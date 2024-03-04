@@ -172,7 +172,6 @@ func (c *Client) HandleMessage(line []byte) {
 
 func (c *Client) SendMessage(msg map[string]interface{}) {
 	c.mu.Lock()
-	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := json.NewEncoder(c.writer).Encode(msg); err != nil {
 		log.Printf("Error sending message to client %d: %v", c.id, err)
@@ -194,7 +193,6 @@ func (ch *Channel) RemoveClient(client *Client) {
 }
 
 func (s *ServerState) FindOrCreateChannel(key string) *Channel {
-	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
