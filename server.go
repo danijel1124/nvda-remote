@@ -159,11 +159,18 @@ func (c *Client) ReadLoop() {
 			if err != io.EOF {
 				log.Printf("Error reading from client %d: %v", c.id, err)
 			}
-			break
+			c.Disconnect()
+			return
 		}
 		c.HandleMessage(line)
 	}
-	c.channel.RemoveClient(c)
+}
+
+func (c *Client) Disconnect() {
+	if c.channel != nil {
+		c.channel.RemoveClient(c)
+	}
+	c.conn.Close()
 }
 
 func (c *Client) HandleMessage(line []byte) {
@@ -228,6 +235,9 @@ func (ch *Channel) RemoveClient(client *Client) {
 		"type":    "client_left",
 		"user_id": client.id,
 	}, nil)
+	if len(ch.clients) == 0 {
+		ch.serverState.RemoveChannel(ch.key)
+	}
 }
 
 func (s *ServerState) FindOrCreateChannel(key string) *Channel {
@@ -260,6 +270,13 @@ func (s *ServerState) PingClients() {
 	s.BroadcastToAll(map[string]interface{}{
 		"type": "ping",
 	})
+	for _, channel := range s.channels {
+		for _, client := range channel.clients {
+			if time.Since(client.lastActivity) > clientTimeout {
+				client.Disconnect()
+			}
+		}
+	}
 }
 
 func handleConnection(conn net.Conn) {
@@ -269,6 +286,7 @@ func handleConnection(conn net.Conn) {
 		conn:   conn,
 		reader: bufio.NewReader(conn),
 		writer: bufio.NewWriter(conn),
+		lastActivity: time.Now(),
 	}
 	// Perform initial setup for the client
 	// ...
