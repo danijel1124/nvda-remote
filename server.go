@@ -96,3 +96,130 @@ func main() {
 		// Handle the connection...
 	}
 }
+import (
+	"bufio"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync/atomic"
+)
+
+// Define types and functions to replicate the functionality of the Python implementation...
+
+type Channel struct {
+	clients map[int]*Client
+	key     string
+	mu      sync.RWMutex
+}
+
+type Client struct {
+	id      int
+	channel *Channel
+	conn    net.Conn
+	reader  *bufio.Reader
+	writer  *bufio.Writer
+}
+
+type ServerState struct {
+	channels map[string]*Channel
+	motd     string
+}
+
+var (
+	globalServerState ServerState
+	clientIDCounter   int32
+)
+
+func NewChannel(key string) *Channel {
+	return &Channel{
+		clients: make(map[int]*Client),
+		key:     key,
+	}
+}
+
+func (c *Client) ReadLoop() {
+	for {
+		line, _, err := c.reader.ReadLine()
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Error reading from client %d: %v", c.id, err)
+			}
+			break
+		}
+		c.HandleMessage(line)
+	}
+	c.channel.RemoveClient(c)
+}
+
+func (c *Client) HandleMessage(line []byte) {
+	// Handle incoming messages from clients
+}
+
+func (c *Client) SendMessage(msg map[string]interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := json.NewEncoder(c.writer).Encode(msg); err != nil {
+		log.Printf("Error sending message to client %d: %v", c.id, err)
+	}
+}
+
+func (ch *Channel) AddClient(client *Client) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	ch.clients[client.id] = client
+	// Notify other clients in the channel
+}
+
+func (ch *Channel) RemoveClient(client *Client) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	delete(ch.clients, client.id)
+	// Notify other clients in the channel
+}
+
+func (s *ServerState) FindOrCreateChannel(key string) *Channel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel, exists := s.channels[key]
+	if !exists {
+		channel = NewChannel(key)
+		s.channels[key] = channel
+	}
+	return channel
+}
+
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+	client := &Client{
+		id:     int(atomic.AddInt32(&clientIDCounter, 1)),
+		conn:   conn,
+		reader: bufio.NewReader(conn),
+		writer: bufio.NewWriter(conn),
+	}
+	// Perform initial setup for the client
+	// ...
+	client.ReadLoop()
+}
+
+func main() {
+	// Existing main function code...
+
+	// Initialize global server state
+	globalServerState = ServerState{
+		channels: make(map[string]*Channel),
+		motd:     motd,
+	}
+
+	// Accept connections...
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Failed to accept connection: %v", err)
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
