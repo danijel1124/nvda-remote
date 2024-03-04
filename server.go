@@ -76,6 +76,10 @@ func main() {
 	}
 
 	// Initialize server state...
+	globalServerState = ServerState{
+		channels: make(map[string]*Channel),
+		motd:     motd,
+	}
 
 	// Start the server...
 	addr := fmt.Sprintf("%s:%d", networkInterface, port)
@@ -95,7 +99,7 @@ func main() {
 			continue
 		}
 
-		// Handle the connection...
+		go handleConnection(conn)
 	}
 }
 import (
@@ -216,7 +220,21 @@ func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
 }
 
 func (c *Client) handleGenerateKey(msg map[string]interface{}) {
-	// Implement key generation logic
+	key := generateKey()
+	c.SendMessage(map[string]interface{}{
+		"type": "generate_key",
+		"key":  key,
+	})
+}
+
+func generateKey() string {
+	b := make([]byte, 3) // Adjust size as needed.
+	_, err := rand.Read(b)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return hex.EncodeToString(b)
+}
 }
 
 func (c *Client) HandleMessage(line []byte) {
@@ -229,6 +247,7 @@ func (c *Client) SendMessage(msg map[string]interface{}) {
 	if err := json.NewEncoder(c.writer).Encode(msg); err != nil {
 		log.Printf("Error sending message to client %d: %v", c.id, err)
 	}
+	c.writer.Flush()
 }
 
 func (ch *Channel) AddClient(client *Client) {
@@ -303,10 +322,21 @@ func handleConnection(conn net.Conn) {
 		reader: bufio.NewReader(conn),
 		writer: bufio.NewWriter(conn),
 		lastActivity: time.Now(),
+		lastActivity: time.Now(),
 	}
 	// Perform initial setup for the client
 	// ...
+	client.SendMOTD(globalServerState.motd)
 	client.ReadLoop()
+}
+
+func (c *Client) SendMOTD(motd string) {
+	if motd != "" {
+		c.SendMessage(map[string]interface{}{
+			"type": "motd",
+			"motd": motd,
+		})
+	}
 }
 
 func main() {
@@ -441,10 +471,21 @@ func handleConnection(conn net.Conn) {
 		reader: bufio.NewReader(conn),
 		writer: bufio.NewWriter(conn),
 		lastActivity: time.Now(),
+		lastActivity: time.Now(),
 	}
 	// Perform initial setup for the client
 	// ...
+	client.SendMOTD(globalServerState.motd)
 	client.ReadLoop()
+}
+
+func (c *Client) SendMOTD(motd string) {
+	if motd != "" {
+		c.SendMessage(map[string]interface{}{
+			"type": "motd",
+			"motd": motd,
+		})
+	}
 }
 
 func main() {
