@@ -221,13 +221,34 @@ var messageHandlers = map[string]func(*Client, map[string]interface{}){
 
 func (c *Client) handleJoin(msg map[string]interface{}) {
 	// Implement join logic
-	// Implement join logic with enhanced functionality
-	// ...
+	if channelKey, ok := msg["channel"].(string); ok && channelKey != "" {
+		channel := globalServerState.FindOrCreateChannel(channelKey)
+		channel.AddClient(c)
+		c.SendMessage(map[string]interface{}{
+			"type": "joined_channel",
+			"channel": channelKey,
+		})
+	} else {
+		c.SendMessage(map[string]interface{}{
+			"type": "error",
+			"error": "invalid_channel",
+		})
+	}
 }
 
 func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
-	// Implement protocol version handling logic with enhanced functionality
-	// ...
+	if version, ok := msg["version"].(float64); ok {
+		c.protocolVersion = int(version)
+		c.SendMessage(map[string]interface{}{
+			"type": "protocol_version_set",
+			"version": c.protocolVersion,
+		})
+	} else {
+		c.SendMessage(map[string]interface{}{
+			"type": "error",
+			"error": "invalid_protocol_version",
+		})
+	}
 	// Implement protocol version handling logic
 }
 
