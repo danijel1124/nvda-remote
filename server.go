@@ -161,19 +161,39 @@ func (c *Client) ReadLoop() {
 			}
 			break
 		}
-		var msg map[string]interface{}
-		if err := json.Unmarshal(line, &msg); err != nil {
-			log.Printf("Error unmarshalling message from client %d: %v", c.id, err)
-			continue
-		}
-		c.HandleMessage(msg)
+		c.HandleMessage(line)
 	}
 	c.channel.RemoveClient(c)
 }
 
-func (c *Client) HandleMessage(msg map[string]interface{}) {
-	// Handle incoming messages from clients
-	// This is a placeholder for the actual message handling logic
+func (c *Client) HandleMessage(line []byte) {
+	var msg map[string]interface{}
+	if err := json.Unmarshal(line, &msg); err != nil {
+		log.Printf("Error unmarshalling message from client %d: %v", c.id, err)
+		return
+	}
+	switch msg["type"] {
+	case "join":
+		c.handleJoin(msg)
+	case "protocol_version":
+		c.handleProtocolVersion(msg)
+	case "generate_key":
+		c.handleGenerateKey(msg)
+	default:
+		log.Printf("Unhandled message type from client %d: %v", c.id, msg)
+	}
+}
+
+func (c *Client) handleJoin(msg map[string]interface{}) {
+	// Implement join logic
+}
+
+func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
+	// Implement protocol version handling logic
+}
+
+func (c *Client) handleGenerateKey(msg map[string]interface{}) {
+	// Implement key generation logic
 }
 
 func (c *Client) HandleMessage(line []byte) {
