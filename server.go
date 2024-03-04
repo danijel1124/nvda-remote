@@ -3,10 +3,12 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"net"
 	"os"
 	"sync"
@@ -99,9 +101,11 @@ func main() {
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -125,6 +129,18 @@ func (ch *Channel) Broadcast(msg map[string]interface{}, exclude *Client) {
 	}
 }
 
+	mu       sync.Mutex
+}
+
+// NewChannel creates a new Channel with the given key.
+func NewChannel(key string) *Channel {
+	return &Channel{
+		clients: make(map[int]*Client),
+		key:     key,
+	}
+}
+
+// Client represents a client connected to the server.
 type Client struct {
 	id      int
 	channel *Channel
@@ -279,6 +295,144 @@ func (s *ServerState) PingClients() {
 	}
 }
 
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+	client := &Client{
+		id:     int(atomic.AddInt32(&clientIDCounter, 1)),
+		conn:   conn,
+		reader: bufio.NewReader(conn),
+		writer: bufio.NewWriter(conn),
+		lastActivity: time.Now(),
+	}
+	// Perform initial setup for the client
+	// ...
+	client.ReadLoop()
+}
+
+func main() {
+	// Existing main function code...
+
+	// Initialize global server state
+	globalServerState = ServerState{
+		channels: make(map[string]*Channel),
+		motd:     motd,
+	}
+
+	// Start pinging clients periodically
+	go func() {
+		pingTicker := time.NewTicker(pingInterval)
+		defer pingTicker.Stop()
+		for {
+			select {
+			case <-pingTicker.C:
+				globalServerState.PingClients()
+			}
+		}
+	}()
+
+	// Accept connections...
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Failed to accept connection: %v", err)
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
+	reader  *bufio.Reader
+	writer  *bufio.Writer
+	mu      sync.Mutex
+}
+
+// Channel represents a communication channel on the server.
+type Channel struct {
+	clients map[int]*Client
+	key     string
+	mu      sync.RWMutex
+}
+
+// Broadcast sends a message to all clients in the channel, excluding the sender if provided.
+func (ch *Channel) Broadcast(msg map[string]interface{}, exclude *Client) {
+	ch.mu.RLock()
+	defer ch.mu.RUnlock()
+	for _, client := range ch.clients {
+		if client != exclude {
+			client.SendMessage(msg)
+		}
+	}
+}
+
+// AddClient adds a client to the channel and notifies other clients.
+func (ch *Channel) AddClient(client *Client) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	ch.clients[client.id] = client
+	// Notify other clients that a new client has joined
+	ch.Broadcast(map[string]interface{}{
+		"type":    "client_joined",
+		"user_id": client.id,
+	}, client)
+}
+
+// RemoveClient removes a client from the channel and notifies other clients.
+func (ch *Channel) RemoveClient(client *Client) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	delete(ch.clients, client.id)
+	// Notify other clients that a client has left
+	ch.Broadcast(map[string]interface{}{
+		"type":    "client_left",
+		"user_id": client.id,
+	}, nil)
+	if len(ch.clients) == 0 {
+		ch.serverState.RemoveChannel(ch.key)
+	}
+}
+
+// FindOrCreateChannel finds an existing channel with the given key or creates a new one.
+func (s *ServerState) FindOrCreateChannel(key string) *Channel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel, exists := s.channels[key]
+	if !exists {
+		channel = NewChannel(key)
+		s.channels[key] = channel
+	}
+	return channel
+}
+
+// RemoveChannel removes a channel with the given key from the server state.
+func (s *ServerState) RemoveChannel(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.channels, key)
+}
+
+// BroadcastToAll sends a message to all clients in all channels.
+func (s *ServerState) BroadcastToAll(msg map[string]interface{}) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, channel := range s.channels {
+		channel.Broadcast(msg, nil)
+	}
+}
+
+// PingClients sends a ping message to all clients and disconnects inactive ones.
+func (s *ServerState) PingClients() {
+	s.BroadcastToAll(map[string]interface{}{
+		"type": "ping",
+	})
+	for _, channel := range s.channels {
+		for _, client := range channel.clients {
+			if time.Since(client.lastActivity) > clientTimeout {
+				client.Disconnect()
+			}
+		}
+	}
+}
+
+// handleConnection handles a new client connection.
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 	client := &Client{
