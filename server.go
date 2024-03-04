@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"log"
 	"net/http"
 	"net"
 	"os"
@@ -71,6 +72,7 @@ func main() {
 		data, err := ioutil.ReadFile(motdPath)
 		if err != nil {
 			log.Fatalf("Failed to read MOTD file: %v", err)
+			log.Fatalf("Failed to read MOTD file: %v", err)
 		}
 		motd = string(data)
 	}
@@ -96,12 +98,14 @@ func main() {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Failed to accept connection: %v", err)
+			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
 
 		go handleConnection(conn)
 	}
 }
+
 import (
 	"bufio"
 	"crypto/rand"
@@ -191,12 +195,14 @@ func (c *Client) Disconnect() {
 		c.channel.RemoveClient(c)
 	}
 	c.conn.Close()
+	log.Printf("Client disconnected: %d", c.id)
 }
 
 func (c *Client) HandleMessage(line []byte) {
 	c.lastActivity = time.Now()
 	var msg map[string]interface{}
 	if err := json.Unmarshal(line, &msg); err != nil {
+		log.Printf("Error unmarshalling message from client %d: %v", c.id, err)
 		log.Printf("Error unmarshalling message from client %d: %v", c.id, err)
 		c.Disconnect()
 		return
@@ -281,6 +287,7 @@ func (c *Client) SendMessage(msg map[string]interface{}) {
 	defer c.mu.Unlock()
 	if err := json.NewEncoder(c.writer).Encode(msg); err != nil {
 		log.Printf("Error sending message to client %d: %v", c.id, err)
+		log.Printf("Error sending message to client %d: %v", c.id, err)
 	}
 	c.writer.Flush()
 }
@@ -359,6 +366,7 @@ func handleConnection(conn net.Conn) {
 		lastActivity: time.Now(),
 		lastActivity: time.Now(),
 	}
+	log.Printf("New client connected: %d", client.id)
 	// Perform initial setup for the client
 	// ...
 	client.SendMOTD(globalServerState.motd)
@@ -508,6 +516,7 @@ func handleConnection(conn net.Conn) {
 		lastActivity: time.Now(),
 		lastActivity: time.Now(),
 	}
+	log.Printf("New client connected: %d", client.id)
 	// Perform initial setup for the client
 	// ...
 	client.SendMOTD(globalServerState.motd)
