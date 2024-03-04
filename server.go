@@ -47,6 +47,8 @@ func init() {
 func main() {
 	flag.Parse()
 
+	globalServerState.generatedKeysLimiter = rate.NewLimiter(rate.Every(generatedKeyExpirationTime), 1)
+
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	// Load the certificate, private key, and chain
@@ -68,6 +70,10 @@ func main() {
 	// Create the TLS configuration
 	config := &tls.Config{
 		Certificates: []tls.Certificate{certificate, chainCert},
+		MinVersion:               tls.VersionTLS12,
+		CipherSuites:             []uint16{tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384},
+		PreferServerCipherSuites: true,
+		ClientAuth:               tls.VerifyClientCertIfGiven,
 	}
 
 	// Read the MOTD if it exists
@@ -165,6 +171,7 @@ type Client struct {
 type ServerState struct {
 	channels map[string]*Channel
 	motd     string
+	generatedKeysLimiter *rate.Limiter
 	mu       sync.Mutex
 }
 
@@ -248,7 +255,7 @@ func (c *Client) handleJoin(msg map[string]interface{}) {
 }
 
 func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
-	if version, ok := msg["version"].(float64); ok {
+	if version, ok := msg["version"].(int); ok {
 		c.protocolVersion = int(version)
 		c.SendMessage(map[string]interface{}{
 			"type": "protocol_version_set",
@@ -266,6 +273,13 @@ func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
 func (c *Client) handleGenerateKey(msg map[string]interface{}) {
 	// Implement generate key logic with enhanced functionality
 	// ...
+	if !globalServerState.generatedKeysLimiter.Allow() {
+		c.SendMessage(map[string]interface{}{
+			"type": "error",
+			"error": "rate_limit_exceeded",
+		})
+		return
+	}
 	key := generateKey()
 	c.SendMessage(map[string]interface{}{
 		"type": "generate_key",
@@ -570,3 +584,19 @@ func main() {
 		go handleConnection(conn)
 	}
 }
+type DeferredTask struct {
+	Callback func()
+	Delay    time.Duration
+}
+
+func NewDeferredTask(callback func(), delay time.Duration) *DeferredTask {
+	return &DeferredTask{Callback: callback, Delay: delay}
+}
+
+func (dt *DeferredTask) Schedule() {
+	go func() {
+		time.Sleep(dt.Delay)
+		dt.Callback()
+	}()
+}
+
