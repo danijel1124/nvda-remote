@@ -121,11 +121,13 @@ type Client struct {
 	conn    net.Conn
 	reader  *bufio.Reader
 	writer  *bufio.Writer
+	mu      sync.Mutex
 }
 
 type ServerState struct {
 	channels map[string]*Channel
 	motd     string
+	mu       sync.Mutex
 }
 
 var (
@@ -149,9 +151,19 @@ func (c *Client) ReadLoop() {
 			}
 			break
 		}
-		c.HandleMessage(line)
+		var msg map[string]interface{}
+		if err := json.Unmarshal(line, &msg); err != nil {
+			log.Printf("Error unmarshalling message from client %d: %v", c.id, err)
+			continue
+		}
+		c.HandleMessage(msg)
 	}
 	c.channel.RemoveClient(c)
+}
+
+func (c *Client) HandleMessage(msg map[string]interface{}) {
+	// Handle incoming messages from clients
+	// This is a placeholder for the actual message handling logic
 }
 
 func (c *Client) HandleMessage(line []byte) {
@@ -159,6 +171,7 @@ func (c *Client) HandleMessage(line []byte) {
 }
 
 func (c *Client) SendMessage(msg map[string]interface{}) {
+	c.mu.Lock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := json.NewEncoder(c.writer).Encode(msg); err != nil {
@@ -183,12 +196,20 @@ func (ch *Channel) RemoveClient(client *Client) {
 func (s *ServerState) FindOrCreateChannel(key string) *Channel {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	channel, exists := s.channels[key]
 	if !exists {
 		channel = NewChannel(key)
 		s.channels[key] = channel
 	}
 	return channel
+}
+
+func (s *ServerState) RemoveChannel(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.channels, key)
 }
 
 func handleConnection(conn net.Conn) {
