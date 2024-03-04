@@ -194,32 +194,46 @@ func (c *Client) Disconnect() {
 }
 
 func (c *Client) HandleMessage(line []byte) {
+	c.lastActivity = time.Now()
 	var msg map[string]interface{}
 	if err := json.Unmarshal(line, &msg); err != nil {
 		log.Printf("Error unmarshalling message from client %d: %v", c.id, err)
+		c.Disconnect()
 		return
 	}
-	switch msg["type"] {
-	case "join":
-		c.handleJoin(msg)
-	case "protocol_version":
-		c.handleProtocolVersion(msg)
-	case "generate_key":
-		c.handleGenerateKey(msg)
-	default:
+	if handler, ok := messageHandlers[msg["type"].(string)]; ok {
+		handler(c, msg)
+	} else {
 		log.Printf("Unhandled message type from client %d: %v", c.id, msg)
+		c.SendMessage(map[string]interface{}{
+			"type":    "error",
+			"message": "unknown message type",
+		})
 	}
+}
+
+var messageHandlers = map[string]func(*Client, map[string]interface{}){
+	"join":              (*Client).handleJoin,
+	"protocol_version":  (*Client).handleProtocolVersion,
+	"generate_key":      (*Client).handleGenerateKey,
+	// Add additional message handlers here
 }
 
 func (c *Client) handleJoin(msg map[string]interface{}) {
 	// Implement join logic
+	// Implement join logic with enhanced functionality
+	// ...
 }
 
 func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
+	// Implement protocol version handling logic with enhanced functionality
+	// ...
 	// Implement protocol version handling logic
 }
 
 func (c *Client) handleGenerateKey(msg map[string]interface{}) {
+	// Implement generate key logic with enhanced functionality
+	// ...
 	key := generateKey()
 	c.SendMessage(map[string]interface{}{
 		"type": "generate_key",
