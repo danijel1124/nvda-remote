@@ -115,6 +115,16 @@ type Channel struct {
 	mu      sync.RWMutex
 }
 
+func (ch *Channel) Broadcast(msg map[string]interface{}, exclude *Client) {
+	ch.mu.RLock()
+	defer ch.mu.RUnlock()
+	for _, client := range ch.clients {
+		if client != exclude {
+			client.SendMessage(msg)
+		}
+	}
+}
+
 type Client struct {
 	id      int
 	channel *Channel
@@ -182,14 +192,22 @@ func (ch *Channel) AddClient(client *Client) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	ch.clients[client.id] = client
-	// Notify other clients in the channel
+	// Notify other clients that a new client has joined
+	ch.Broadcast(map[string]interface{}{
+		"type":    "client_joined",
+		"user_id": client.id,
+	}, client)
 }
 
 func (ch *Channel) RemoveClient(client *Client) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	delete(ch.clients, client.id)
-	// Notify other clients in the channel
+	// Notify other clients that a client has left
+	ch.Broadcast(map[string]interface{}{
+		"type":    "client_left",
+		"user_id": client.id,
+	}, nil)
 }
 
 func (s *ServerState) FindOrCreateChannel(key string) *Channel {
@@ -208,6 +226,20 @@ func (s *ServerState) RemoveChannel(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.channels, key)
+}
+
+func (s *ServerState) BroadcastToAll(msg map[string]interface{}) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, channel := range s.channels {
+		channel.Broadcast(msg, nil)
+	}
+}
+
+func (s *ServerState) PingClients() {
+	s.BroadcastToAll(map[string]interface{}{
+		"type": "ping",
+	})
 }
 
 func handleConnection(conn net.Conn) {
@@ -231,6 +263,18 @@ func main() {
 		channels: make(map[string]*Channel),
 		motd:     motd,
 	}
+
+	// Start pinging clients periodically
+	go func() {
+		pingTicker := time.NewTicker(pingInterval)
+		defer pingTicker.Stop()
+		for {
+			select {
+			case <-pingTicker.C:
+				globalServerState.PingClients()
+			}
+		}
+	}()
 
 	// Accept connections...
 	for {
