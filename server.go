@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
+	"golang.org/x/time/rate"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -46,6 +48,8 @@ func init() {
 
 func main() {
 	flag.Parse()
+
+	globalServerState.generatedKeysLimiter = rate.NewLimiter(rate.Every(generatedKeyExpirationTime), 1)
 
 	globalServerState.generatedKeysLimiter = rate.NewLimiter(rate.Every(generatedKeyExpirationTime), 1)
 
@@ -165,12 +169,14 @@ type Client struct {
 	conn    net.Conn
 	reader  *bufio.Reader
 	writer  *bufio.Writer
+	protocolVersion int
 	mu      sync.Mutex
 }
 
 type ServerState struct {
 	channels map[string]*Channel
 	motd     string
+	generatedKeysLimiter *rate.Limiter
 	generatedKeysLimiter *rate.Limiter
 	mu       sync.Mutex
 }
@@ -255,11 +261,12 @@ func (c *Client) handleJoin(msg map[string]interface{}) {
 }
 
 func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
-	if version, ok := msg["version"].(int); ok {
+	if version, ok := msg["version"].(float64); ok {
+		c.protocolVersion = int(version)
 		c.protocolVersion = int(version)
 		c.SendMessage(map[string]interface{}{
 			"type": "protocol_version_set",
-			"version": c.protocolVersion,
+			"version": version,
 		})
 	} else {
 		c.SendMessage(map[string]interface{}{
@@ -267,12 +274,20 @@ func (c *Client) handleProtocolVersion(msg map[string]interface{}) {
 			"error": "invalid_protocol_version",
 		})
 	}
+}
 	// Implement protocol version handling logic
 }
 
 func (c *Client) handleGenerateKey(msg map[string]interface{}) {
 	// Implement generate key logic with enhanced functionality
 	// ...
+	if !globalServerState.generatedKeysLimiter.Allow() {
+		c.SendMessage(map[string]interface{}{
+			"type": "error",
+			"error": "rate_limit_exceeded",
+		})
+		return
+	}
 	if !globalServerState.generatedKeysLimiter.Allow() {
 		c.SendMessage(map[string]interface{}{
 			"type": "error",
