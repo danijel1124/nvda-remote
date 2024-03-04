@@ -10,6 +10,8 @@ import (
 	"log"
 	"log"
 	"net/http"
+	"log"
+	"io/ioutil"
 	"net"
 	"os"
 	"sync"
@@ -44,6 +46,8 @@ func init() {
 
 func main() {
 	flag.Parse()
+
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	// Load the certificate, private key, and chain
 	certificate, err := tls.LoadX509KeyPair(certificatePath, privKeyPath)
@@ -195,6 +199,7 @@ func (c *Client) Disconnect() {
 		c.channel.RemoveClient(c)
 	}
 	c.conn.Close()
+	log.Printf("Client disconnected: %d", c.id)
 	log.Printf("Client disconnected: %d", c.id)
 }
 
@@ -367,6 +372,7 @@ func handleConnection(conn net.Conn) {
 		lastActivity: time.Now(),
 	}
 	log.Printf("New client connected: %d", client.id)
+	log.Printf("New client connected: %d", client.id)
 	// Perform initial setup for the client
 	// ...
 	client.SendMOTD(globalServerState.motd)
@@ -516,6 +522,7 @@ func handleConnection(conn net.Conn) {
 		lastActivity: time.Now(),
 		lastActivity: time.Now(),
 	}
+	log.Printf("New client connected: %d", client.id)
 	log.Printf("New client connected: %d", client.id)
 	// Perform initial setup for the client
 	// ...
