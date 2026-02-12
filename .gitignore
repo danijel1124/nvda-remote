@@ -1,0 +1,6 @@
+server/data/
+server/certificate/
+venv/
+client/venv/
+*.nvda-addon
+*.log

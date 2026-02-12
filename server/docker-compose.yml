@@ -6,5 +6,6 @@ services:
     image: "remote_server:latest"
     volumes:
       - ./certificate:/usr/src/app/certificate
+      - ./data:/usr/src/app/data
     ports:
       - "6837:6837"
