@@ -34,6 +34,7 @@ class RemoteMessageType(Enum):
     motd = "motd"
     version_mismatch = "version_mismatch"
     ping = "ping"
+    pong = "pong"
     error = "error"
     nvda_not_connected = "nvda_not_connected" # This was added in version 2 but never implemented on the server
     

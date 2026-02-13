@@ -150,6 +150,12 @@ class Handler(LineReceiver):
 			self.do_auth_admin(parsed)
 			return
 
+		if parsed['type'] in ('ping', 'pong'):
+			method_name = "do_" + parsed['type']
+			if hasattr(self, method_name):
+				getattr(self, method_name)(parsed)
+			return
+
 		if self.user.channel is not None:
 			self.user.channel.send_to_clients(parsed, exclude=self.user, origin=self.user.user_id)
 			return
@@ -157,6 +163,12 @@ class Handler(LineReceiver):
 			log.msg("No function for type %s" % parsed['type'])
 			return
 		getattr(self, "do_"+parsed['type'])(parsed)
+
+	def do_ping(self, obj):
+		self.send(type='pong')
+
+	def do_pong(self, obj):
+		pass
 
 	def handle_admin_command(self, parsed):
 		if not self.user.is_admin:

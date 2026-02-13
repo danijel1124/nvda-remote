@@ -136,6 +136,11 @@ class RemoteSession:
 		self.transport.registerInbound(
 			RemoteMessageType.client_left, self.handleClientDisconnected
 		)
+		self.transport.registerInbound(RemoteMessageType.ping, self.handlePing)
+
+	def handlePing(self) -> None:
+		"""Handle ping from server by sending a pong response."""
+		self.transport.send(RemoteMessageType.pong)
 
 	def registerCallbacks(self) -> None:
 		"""Register all callback handlers for this session.
