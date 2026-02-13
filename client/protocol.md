@@ -246,6 +246,13 @@ Below is a detailed specification of each message type using JSONSchema:
       },
       "required": ["type"]
     },
+    "pong": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "pong" }
+      },
+      "required": ["type"]
+    },
     "error": {
       "type": "object",
       "properties": {
@@ -263,6 +270,13 @@ Below is a detailed specification of each message type using JSONSchema:
 - All connections are encrypted using SSL/TLS.
 - Clients can verify the server's certificate fingerprint to prevent man-in-the-middle attacks.
 - The channel key acts as a shared secret for authentication.
+
+## Reliability (Heartbeat)
+
+To maintain active connections and prevent timeouts by network infrastructure (firewalls, NAT), the protocol implements a heartbeat:
+- **Server to Client:** The server sends a `ping` every 5 minutes.
+- **Client to Server:** The client responds immediately with a `pong`.
+- **Client to Server:** The client may also send a `ping`, which the server will answer with a `pong`.
 
 ## Error Handling
 
