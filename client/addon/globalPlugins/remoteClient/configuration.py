@@ -22,6 +22,9 @@ configspec = StringIO("""
 	key = string(default="")
 	admin_token = string(default="")
 
+[admin_tokens]
+	__many__ = string(default="")
+
 [seen_motds]
 	__many__ = string(default="")
 
