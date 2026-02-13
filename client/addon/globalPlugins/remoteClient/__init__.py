@@ -27,6 +27,9 @@ class GlobalPlugin(_GlobalPlugin):
 		super().__init__(*args, **kwargs)
 		self.client = RemoteClient()
 		self.client.registerLocalScript(self.script_sendKeys)
+		from . import configuration
+		import gui
+		configuration.migrate_legacy_token(gui.mainFrame, self.client)
 
 	def terminate(self):
 		self.client.terminate()

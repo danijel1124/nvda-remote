@@ -43,6 +43,45 @@ def get_config():
 		_config.validate(val, copy=True)
 	return _config
 
+def migrate_legacy_token(parent_window, client):
+	"""Checks for a legacy admin token and asks the user to migrate it."""
+	import wx
+	import gui
+	conf = get_config()
+	legacy_token = conf['controlserver'].get('admin_token', '')
+	
+	if not legacy_token:
+		return
+
+	# If it's already in the new structure, we don't need to ask (or we could, but let's be smart)
+	# Check if this token is already assigned to any server
+	if any(t == legacy_token for t in conf.get('admin_tokens', {}).values()):
+		# Already migrated or manually added
+		return
+
+	def do_migration():
+		msg = _("New configuration structure\nLegacy admin tokens found. Should they be transferred? In the following screen, you must name the token (e.g., the server address).")
+		if gui.messageBox(msg, _("Configuration Migration"), wx.YES_NO | wx.ICON_QUESTION, parent=parent_window) == wx.YES:
+			dlg = wx.TextEntryDialog(parent_window, _("Enter a name or server address for this token:"), _("Token Migration"), value=conf['controlserver'].get('host', ''))
+			if dlg.ShowModal() == wx.ID_OK:
+				name = dlg.GetValue().strip()
+				if name:
+					if 'admin_tokens' not in conf:
+						conf['admin_tokens'] = {}
+					conf['admin_tokens'][name] = legacy_token
+					# We keep the legacy one for now to avoid losing data if migration fails, 
+					# but the UI will now prefer the new structure.
+					conf.write()
+					gui.messageBox(_("Token successfully transferred."), _("Success"), wx.OK | wx.ICON_INFORMATION)
+			dlg.Destroy()
+		else:
+			# User denied migration, clear legacy token to stop asking
+			conf['controlserver']['admin_token'] = ""
+			conf.write()
+			gui.messageBox(_("Legacy token deleted."), _("Configuration Updated"), wx.OK | wx.ICON_INFORMATION)
+
+	wx.CallAfter(do_migration)
+
 def write_connection_to_config(connection_info: ConnectionInfo):
 	"""Writes a connection to the last connected section of the config.
 	If the connection is already in the config, move it to the end.
