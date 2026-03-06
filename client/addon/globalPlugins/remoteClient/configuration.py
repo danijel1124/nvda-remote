@@ -47,6 +47,52 @@ def get_config():
 		_config['controlserver']['key'] = socket.gethostname()
 	return _config
 
+def minify_config(parent_window):
+	"""Identifies and removes unused configuration keys after asking the user."""
+	import wx
+	import gui
+	conf = get_config()
+	spec = conf.configspec
+	to_delete = [] # List of (section_path, key_or_section_name)
+
+	def find_extra(config_section, spec_section, path=[]):
+		# Check for extra scalars
+		for key in config_section.scalars:
+			if key not in spec_section.scalars and '__many__' not in spec_section.scalars:
+				to_delete.append((path, key))
+		
+		# Check for extra sections
+		for section_name in config_section.sections:
+			if section_name not in spec_section.sections:
+				if '__many__' in spec_section.sections:
+					continue
+				else:
+					to_delete.append((path, section_name))
+			else:
+				find_extra(config_section[section_name], spec_section[section_name], path + [section_name])
+
+	find_extra(conf, spec)
+	
+	if not to_delete:
+		return
+
+	# Format the list for the user display
+	items_text = "\n".join([f"{'.'.join(p) + '.' if p else ''}{k}" for p, k in to_delete])
+	
+	def do_minify():
+		msg = _("The following unused or old configuration entries were found and can be removed:\n\n{items}\n\nDo you want to delete these entries?").format(items=items_text)
+		if gui.messageBox(msg, _("Clean up Configuration"), wx.YES_NO | wx.ICON_QUESTION, parent=parent_window) == wx.YES:
+			for path, key in to_delete:
+				target = conf
+				for p in path:
+					target = target[p]
+				if key in target:
+					del target[key]
+			conf.write()
+			gui.messageBox(_("Configuration cleaned up successfully."), _("Success"), wx.OK | wx.ICON_INFORMATION)
+
+	wx.CallAfter(do_minify)
+
 def migrate_config(parent_window):
 	"""Checks if the configuration needs migration and asks the user."""
 	import wx

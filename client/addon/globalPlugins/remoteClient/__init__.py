@@ -30,6 +30,7 @@ class GlobalPlugin(_GlobalPlugin):
 		from . import configuration
 		import gui
 		configuration.migrate_config(gui.mainFrame)
+		configuration.minify_config(gui.mainFrame)
 		configuration.migrate_legacy_token(gui.mainFrame, self.client)
 
 	def terminate(self):

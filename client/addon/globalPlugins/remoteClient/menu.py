@@ -88,6 +88,12 @@ class RemoteMenu(wx.Menu):
 		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.client.onShowAdmin, self.adminItem)
 		self.adminItem.Enable(False)
 
+		# Translators: Menu item in NVDA Remote submenu to clean up unused configuration.
+		self.cleanupItem: wx.MenuItem = self.Append(
+			wx.ID_ANY, _("Clean up configuration..."), _("Remove unused or old configuration entries")
+		)
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.onCleanupItem, self.cleanupItem)
+
 		# Translators: Label of menu in NVDA tools menu.
 		self.remoteItem = toolsMenu.AppendSubMenu(
 			self, _("R&emote"), _("NVDA Remote Access")
@@ -112,6 +118,9 @@ class RemoteMenu(wx.Menu):
 		self.Remove(self.sendCtrlAltDelItem.Id)
 		self.sendCtrlAltDelItem.Destroy()
 		self.sendCtrlAltDelItem = None
+		self.Remove(self.cleanupItem.Id)
+		self.cleanupItem.Destroy()
+		self.cleanupItem = None
 		tools_menu = gui.mainFrame.sysTrayIcon.toolsMenu
 		tools_menu.Remove(self.remoteItem.Id)
 		self.remoteItem.Destroy()
@@ -140,6 +149,10 @@ class RemoteMenu(wx.Menu):
 	def onSendCtrlAltDel(self, evt: wx.CommandEvent) -> None:
 		evt.Skip()
 		self.client.sendSAS()
+
+	def onCleanupItem(self, evt: wx.CommandEvent) -> None:
+		from . import configuration
+		configuration.minify_config(gui.mainFrame)
 
 	def handleConnected(self, mode: ConnectionMode, connected: bool) -> None:
 		self.connectItem.Enable(not connected)
