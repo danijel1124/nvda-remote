@@ -41,12 +41,9 @@ class ClientPanel(wx.Panel):
 		sizer.Add(self.host)
 		# Translators: Label of the edit field to enter session name (password) to secure the remote connection.
 		sizer.Add(wx.StaticText(self, wx.ID_ANY, label=_("&Session name:")))
-		self.key = wx.TextCtrl(self, wx.ID_ANY)
+		self.key = wx.TextCtrl(self, wx.ID_ANY, value=configuration.get_config()['controlserver']['key'])
+		self.key.Enable(False)
 		sizer.Add(self.key)
-		# Translators: The button used to generate a random session name.
-		self.generate_key = wx.Button(parent=self, label=_("&Generate session name"))
-		self.generate_key.Bind(wx.EVT_BUTTON, self.on_generate_key)
-		sizer.Add(self.generate_key)
 		self.SetSizerAndFit(sizer)
 
 	def on_generate_key(self, evt: wx.CommandEvent) -> None:

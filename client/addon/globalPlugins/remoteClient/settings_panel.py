@@ -53,7 +53,8 @@ class RemoteSettingsPanel(SettingsPanel):
 	def set_controls(self) -> None:
 		state = bool(self.autoconnect.GetValue())
 		self.connection_type.Enable(state)
-		self.key.Enable(state)
+		# The session name (key) is now always the hostname and should not be editable
+		self.key.Enable(False)
 		self.host.Enable(state)
 
 	def set_from_config(self) -> None:

@@ -29,6 +29,7 @@ class GlobalPlugin(_GlobalPlugin):
 		self.client.registerLocalScript(self.script_sendKeys)
 		from . import configuration
 		import gui
+		configuration.migrate_config(gui.mainFrame)
 		configuration.migrate_legacy_token(gui.mainFrame, self.client)
 
 	def terminate(self):

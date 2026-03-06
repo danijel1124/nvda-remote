@@ -1,4 +1,5 @@
 import os
+import socket
 from io import StringIO
 
 import configobj
@@ -14,10 +15,11 @@ configspec = StringIO("""
 [connections]
 	last_connected = list(default=list())
 [controlserver]
-	autoconnect = boolean(default=False)
+	version = float(default=2.0)
+	autoconnect = boolean(default=True)
 	self_hosted = boolean(default=False)
 	connection_type = integer(default=0)
-	host = string(default="")
+	host = string(default="danijel0.danijels-computer.de")
 	port = integer(default=6837)
 	key = string(default="")
 	admin_token = string(default="")
@@ -41,7 +43,50 @@ def get_config():
 		_config = configobj.ConfigObj(infile=path, configspec=configspec, create_empty=True)
 		val = validate.Validator()
 		_config.validate(val, copy=True)
+		# Always enforce hostname as the session name (key)
+		_config['controlserver']['key'] = socket.gethostname()
 	return _config
+
+def migrate_config(parent_window):
+	"""Checks if the configuration needs migration and asks the user."""
+	import wx
+	import gui
+	conf = get_config()
+	if conf['controlserver']['version'] >= 3.1:
+		return
+
+	def do_migration():
+		# Check if current config is already "standard" or if it's empty
+		is_empty = not conf['controlserver']['host'] or conf['controlserver']['host'] == ""
+		is_non_standard = conf['controlserver']['host'] != "danijel0.danijels-computer.de" or not conf['controlserver']['autoconnect']
+		
+		if is_empty:
+			# Just apply defaults silently for fresh installs
+			conf['controlserver']['host'] = "danijel0.danijels-computer.de"
+			conf['controlserver']['autoconnect'] = True
+			conf['controlserver']['version'] = 3.1
+			conf.write()
+			return
+
+		if is_non_standard:
+			msg = _("A new standard configuration for NVDA Remote is available. \n\n"
+					"Should the connection to {new_host} be activated and autoconnect enabled? \n"
+					"Your current host is: {current_host}").format(
+						new_host="danijel0.danijels-computer.de",
+						current_host=conf['controlserver']['host']
+					)
+			if gui.messageBox(msg, _("NVDA Remote Configuration Update"), wx.YES_NO | wx.ICON_QUESTION, parent=parent_window) == wx.YES:
+				conf['controlserver']['host'] = "danijel0.danijels-computer.de"
+				conf['controlserver']['autoconnect'] = True
+				# If we update the host, we also set the key to hostname to be sure
+				conf['controlserver']['key'] = socket.gethostname()
+				gui.messageBox(_("Configuration successfully updated to new standards."), _("Success"), wx.OK | wx.ICON_INFORMATION)
+		
+		# Set version to 3.1 anyway to stop asking
+		conf['controlserver']['version'] = 3.1
+		conf.write()
+
+	wx.CallAfter(do_migration)
 
 def migrate_legacy_token(parent_window, client):
 	"""Checks for a legacy admin token and asks the user to migrate it."""
