@@ -1,3 +1,4 @@
 Twisted
 pyopenssl
 service-identity
+autobahn[twisted]                                                                                                                                                                                    
