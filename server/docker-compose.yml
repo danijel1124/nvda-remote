@@ -4,6 +4,7 @@ services:
   remote_server:
     build: "."
     image: "remote_server:latest"
+    restart: unless-stopped
     volumes:
       - ./certificate:/usr/src/app/certificate
       - ./data:/usr/src/app/data
