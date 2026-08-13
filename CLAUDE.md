@@ -25,7 +25,7 @@ Unlike stock NVDA Remote (where any shared random key lets two clients pair), th
 
 ## Versioning
 
-- Current add-on version: **3.2**, set in `client/buildVars.py` (`addon_info["addon_version"]`).
+- Current add-on version: **3.2.1**, set in `client/buildVars.py` (`addon_info["addon_version"]`).
 - Config migrations for upgrades live in `migrate_config()` in `client/addon/globalPlugins/remoteClient/configuration.py`.
 
 ## Working conventions

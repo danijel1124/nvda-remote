@@ -530,7 +530,18 @@ class TCPTransport(Transport):
 			obj = self.serializer.serialize(type=type, **kwargs)
 			self.queue.put(obj)
 		else:
-			log.error("Attempted to send message %r while not connected", type)
+			# Deliberately warning, not error: sending while disconnected is
+			# a routine, expected race in an async multi-threaded system
+			# (e.g. mid-reconnect), not a bug worth alarming over - and NVDA
+			# plays its own error.wav for every ERROR-level log entry, which
+			# for RemoteMessageType.wave specifically (relayed via
+			# nvwave.decide_playWaveFile in session.py) would itself get
+			# relayed and fail again, an unbounded feedback loop of error
+			# beeps. See handleTransportDisconnected's docstring in
+			# session.py for the primary fix (unregistering the relay hooks
+			# on disconnect) - this is defense in depth for any other gap of
+			# the same shape.
+			log.warning("Attempted to send message %r while not connected", type)
 
 	def _disconnect(self) -> None:
 		"""Internal method to disconnect the transport.

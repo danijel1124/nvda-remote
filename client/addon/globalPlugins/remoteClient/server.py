@@ -81,7 +81,13 @@ class LocalRelayServer:
 		serverSocket = socket.socket(family, type)
 		certfile = os.path.join(os.path.abspath(
 			os.path.dirname(__file__)), 'server.pem')
-		serverSocket = ssl.wrap_socket(serverSocket, certfile=certfile)
+		# ssl.wrap_socket() was deprecated since Python 3.7 and removed in
+		# 3.12 - newer NVDA builds ship a Python new enough that this raised
+		# AttributeError on every secure-desktop transition, breaking the
+		# whole bridge (see client/CLAUDE.md's secureDesktop.py entry).
+		context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+		context.load_cert_chain(certfile=certfile)
+		serverSocket = context.wrap_socket(serverSocket, server_side=True)
 		serverSocket.bind(bind_addr)
 		serverSocket.listen(5)
 		return serverSocket

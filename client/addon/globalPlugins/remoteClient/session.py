@@ -299,6 +299,13 @@ class SlaveSession(RemoteSession):
 		self.masters = defaultdict(dict)
 		self.masterDisplaySizes = []
 		self.transport.transportClosing.register(self.handleTransportClosing)
+		# handleTransportDisconnected existed but was never wired up to
+		# anything - the unexpected-drop path (as opposed to a deliberate
+		# close) never ran its cleanup at all, which is what let the beep-
+		# storm feedback loop happen (see that method's docstring). Same
+		# transportClosing-only-registration gap as MasterSession's
+		# _resetControlState had before it was fixed to register on both.
+		self.transport.transportDisconnected.register(self.handleTransportDisconnected)
 		self.patcher = nvda_patcher.NVDASlavePatcher()
 		self.transport.registerInbound(
 			RemoteMessageType.channel_joined, self.handleChannelJoined
@@ -365,13 +372,28 @@ class SlaveSession(RemoteSession):
 	def handleTransportDisconnected(self) -> None:
 		"""Handle disconnection from the transport layer.
 
-		Called when the transport connection is lost. This method:
+		Called when the transport connection is lost unexpectedly (as
+		opposed to handleTransportClosing, for a deliberate close). This
+		method:
 		1. Plays a connection sound cue
 		2. Removes any NVDA patches
+		3. Unregisters the outbound wave/tone/cancel relay callbacks
+
+		Step 3 matters as more than just symmetry with handleTransportClosing:
+		without it, nvwave.decide_playWaveFile stays hooked after an
+		unexpected drop, so every locally-played wave file (including NVDA's
+		own error.wav, played automatically for any ERROR-level log entry)
+		keeps getting relayed via transport.send() - which is disconnected,
+		so that logs its own "Attempted to send message while not connected"
+		ERROR, which triggers another local error.wav, which gets relayed
+		again... an unbounded feedback loop of error beeps until the
+		transport reconnects. Confirmed from a real user's NVDA log.
 		"""
 		log.info("Transport disconnected from slave session")
 		cues.client_connected()
 		self.patcher.unregister()
+		if self.patchCallbacksAdded:
+			self.unregisterCallbacks()
 
 	def handleClientDisconnected(self, client: Optional[Dict[str, Any]] = None) -> None:
 		super().handleClientDisconnected(client)
