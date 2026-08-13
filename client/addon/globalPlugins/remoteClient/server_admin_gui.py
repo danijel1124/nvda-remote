@@ -97,6 +97,7 @@ class ServerAdminDialog(wx.Dialog):
 		self.list_ctrl.InsertColumn(1, _("Status"), width=100)
 		self.list_ctrl.InsertColumn(2, _("Authorization"), width=150)
 		self.list_ctrl.InsertColumn(3, _("Clients"), width=80)
+		self.list_ctrl.InsertColumn(4, _("Add-on version"), width=150)
 		
 		vbox.Add(self.list_ctrl, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
 
@@ -209,7 +210,15 @@ class ServerAdminDialog(wx.Dialog):
 			auth_text = _("Authorized") if ch['authorized'] else _("QUARANTINE")
 			self.list_ctrl.SetItem(idx, 2, auth_text)
 			self.list_ctrl.SetItem(idx, 3, str(client_count))
-			
+			# Self-reported per connected client (see transport.py's join
+			# message) - "?" for a client too old to report it (pre-3.2.2),
+			# not an error. A channel can have several connections (slave +
+			# one or more masters) that may be on different versions, so show
+			# all of them rather than picking one.
+			versions = ch.get('versions') or []
+			version_text = ", ".join(v if v else "?" for v in versions) if versions else ""
+			self.list_ctrl.SetItem(idx, 4, version_text)
+
 			if not ch['authorized']:
 				self.list_ctrl.SetItemTextColour(idx, wx.Colour(200, 0, 0))
 			elif not is_online:

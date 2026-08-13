@@ -42,7 +42,8 @@ Below is a detailed specification of each message type using JSONSchema:
       "properties": {
         "type": { "const": "join" },
         "channel": { "type": "string" },
-        "connection_type": { "enum": ["master", "slave"] }
+        "connection_type": { "enum": ["master", "slave"] },
+        "client_version": { "type": "string", "description": "Added in v3.2.2. Optional self-reported add-on version, dotted-numeric e.g. \"3.2.2\". Older clients omit it. Admin-visibility only (surfaces in the admin_list_channels response) - never echoed back into channel_joined/client_joined, which other, non-admin clients also parse." }
       },
       "required": ["type", "channel", "connection_type"]
     },

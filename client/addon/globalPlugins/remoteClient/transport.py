@@ -30,6 +30,7 @@ from logging import getLogger
 from queue import Queue
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
+import addonHandler
 from dataclasses import dataclass
 import wx
 from extensionPoints import Action, HandlerRegistrar
@@ -653,9 +654,24 @@ class RelayTransport(TCPTransport):
 				RemoteMessageType.join,
 				channel=self.channel,
 				connection_type=self.connectionType,
+				# Purely for admin visibility server-side (do_admin_list_channels'
+				# 'versions' field) - do_join reads this via obj.get(), so an
+				# older server that doesn't know about it simply never looks,
+				# and this is never relayed onward to other clients (see the
+				# comment on User.client_version server-side), so it can't
+				# break an old peer's channel_joined/client_joined parsing
+				# either.
+				client_version=self._getOwnAddonVersion(),
 			)
 		else:
 			self.send(RemoteMessageType.generate_key)
+
+	def _getOwnAddonVersion(self) -> Optional[str]:
+		try:
+			return addonHandler.getCodeAddon().version
+		except Exception:
+			log.error("Could not determine own add-on version", exc_info=True)
+			return None
 
 
 class ConnectorThread(threading.Thread):

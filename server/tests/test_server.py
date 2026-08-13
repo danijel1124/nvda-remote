@@ -228,6 +228,54 @@ class RelayServerTestCase(unittest.TestCase):
 		self.assertTrue(keys['pcA']['online'])
 		self.assertTrue(keys['pcA']['authorized'])
 
+	# --- client_version self-report (admin visibility) ---
+
+	def test_admin_list_reports_self_reported_client_version(self):
+		self.state.authorize_key('pcA')
+		p, t = self.connect()
+		self.send(p, type='protocol_version', version=2)
+		self.send(p, type='join', channel='pcA', connection_type='slave', client_version='3.2.1')
+		_read(t)
+		self.send(p, type='auth_admin', token=self.state.admin_token)
+		msgs = _read(t)
+		channels = {c['key']: c for c in msgs[1]['channels']}
+		self.assertEqual(channels['pcA']['versions'], ['3.2.1'])
+
+	def test_admin_list_shows_none_for_client_too_old_to_report_version(self):
+		# join() without client_version - exactly what a pre-3.2.2 client sends.
+		p, t = self.join('pcA', 'slave')
+		self.send(p, type='auth_admin', token=self.state.admin_token)
+		msgs = _read(t)
+		channels = {c['key']: c for c in msgs[1]['channels']}
+		self.assertEqual(channels['pcA']['versions'], [None])
+
+	def test_admin_list_reports_one_version_per_connected_client(self):
+		self.state.authorize_key('pcA')
+		slave, ts = self.connect()
+		self.send(slave, type='protocol_version', version=2)
+		self.send(slave, type='join', channel='pcA', connection_type='slave', client_version='3.2.1')
+		master, tm = self.connect()
+		self.send(master, type='protocol_version', version=2)
+		self.send(master, type='join', channel='pcA', connection_type='master', client_version='3.2.2')
+		_read(ts)
+		self.send(slave, type='auth_admin', token=self.state.admin_token)
+		msgs = _read(ts)
+		channels = {c['key']: c for c in msgs[1]['channels']}
+		self.assertEqual(sorted(channels['pcA']['versions']), ['3.2.1', '3.2.2'])
+
+	def test_client_version_is_never_relayed_to_other_clients(self):
+		# It's admin-visibility only (do_admin_list_channels) - must not leak
+		# into channel_joined/client_joined, which real peer clients (not
+		# just the admin GUI) parse.
+		self.state.authorize_key('pcA')
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.connect()
+		self.send(master, type='protocol_version', version=2)
+		self.send(master, type='join', channel='pcA', connection_type='master', client_version='3.2.1')
+		joined = [m for m in _read(ts) if m['type'] == 'client_joined'][0]
+		self.assertNotIn('client_version', joined)
+		self.assertNotIn('client_version', joined.get('client', {}))
+
 	# --- controller gating: observers can't send input ---
 
 	def test_second_master_is_denied_input_first_master_still_works(self):

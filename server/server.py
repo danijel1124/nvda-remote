@@ -428,11 +428,18 @@ class Handler(LineReceiver):
 			is_online = key in state.channels
 			is_authorized = state.is_key_authorized(key)
 			client_count = len(state.channels[key].clients) if is_online else 0
+			# Self-reported by each client's 'join' message - None for
+			# clients too old to send it (pre-3.2.2), not an error.
+			versions = (
+				[c.client_version for c in state.channels[key].clients.values()]
+				if is_online else []
+			)
 			channels_info.append({
 				'key': key,
 				'client_count': client_count,
 				'authorized': is_authorized,
-				'online': bool(is_online)
+				'online': bool(is_online),
+				'versions': versions,
 			})
 		log.msg(f"Sending list: {channels_info}")
 		self.send(type='admin_channel_list', channels=channels_info)
@@ -458,7 +465,11 @@ class Handler(LineReceiver):
 		if 'channel' not in obj or not obj['channel']:
 			self.send(type='error', error='invalid_parameters')
 			return
-		self.user.join(obj['channel'], connection_type=obj.get('connection_type'))
+		self.user.join(
+			obj['channel'],
+			connection_type=obj.get('connection_type'),
+			client_version=obj.get('client_version'),
+		)
 		self.cleanup_timer.cancel()
 
 	def do_protocol_version(self, obj):
@@ -489,6 +500,15 @@ class User(object):
 		self.channel = None
 		self.server_state = self.protocol.factory.server_state
 		self.connection_type = None
+		# Self-reported by the client in its 'join' message (client_version,
+		# optional - older clients don't send it). Admin-visibility only, see
+		# do_admin_list_channels - never relayed to other clients via
+		# as_dict()/channel_joined/client_joined, since those are consumed by
+		# real remote-control peers (not just the admin GUI) and this session
+		# already established that new fields on existing peer-facing
+		# messages risk breaking already-deployed clients with fixed
+		# handlers.
+		self.client_version = None
 		self.user_id = User.user_id + 1
 		User.user_id += 1
 		self.is_admin = False
@@ -535,11 +555,12 @@ class User(object):
 		if self.channel is not None:
 			self.channel.remove_connection(self)
 
-	def join(self, channel, connection_type):
+	def join(self, channel, connection_type, client_version=None):
 		if self.channel:
 			self.send(type="error", error="already_joined")
 			return
 		self.connection_type = connection_type
+		self.client_version = client_version
 		self.channel = self.server_state.find_or_create_channel(channel)
 		self.channel.add_client(self)
 

@@ -5,3 +5,6 @@ venv/
 client/venv/
 *.nvda-addon
 *.log
+__pycache__/
+*.pyc
+server/_trial_temp/
