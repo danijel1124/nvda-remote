@@ -10,7 +10,7 @@ Build the add-on (needs `scons` and `markdown` installed, e.g. in the repo's `ve
 ```bash
 scons
 ```
-Produces `remote-<version>.nvda-addon` (currently `remote-3.2.3.nvda-addon`) in this directory. `scons` is also the default SConstruct target — CI (`../.github/workflows/main.yml`, at the *repo root*, not under `client/` — GitHub Actions only discovers workflows at the repository root, so it must live there even though this sub-project used to be the whole repo) runs `pip install scons markdown && scons` (via `working-directory: client`) on every push/PR to `master`/`main`, and on any tag push additionally creates a GitHub Release with the built `.nvda-addon` attached.
+Produces `remote-<version>.nvda-addon` (currently `remote-3.2.3.1.nvda-addon`) in this directory. `scons` is also the default SConstruct target — CI (`../.github/workflows/main.yml`, at the *repo root*, not under `client/` — GitHub Actions only discovers workflows at the repository root, so it must live there even though this sub-project used to be the whole repo) runs `pip install scons markdown && scons` (via `working-directory: client`) on every push/PR to `master`/`main`, and on any tag push additionally creates a GitHub Release with the built `.nvda-addon` attached.
 
 Other scons targets:
 ```bash

@@ -26,7 +26,7 @@ Unlike stock NVDA Remote (where any shared random key lets two clients pair), th
 
 ## Versioning
 
-- Current add-on version: **3.2.3**, set in `client/buildVars.py` (`addon_info["addon_version"]`). Tagged/released as `vX.Y.Z`.
+- Current add-on version: **3.2.3.1**, set in `client/buildVars.py` (`addon_info["addon_version"]`). Tagged/released as `vX.Y.Z`.
 - Current server version: **1.1.0**, set as `SERVER_VERSION` in `server/server.py`. Tagged/released as `server-vX.Y.Z` (distinct tag namespace, so client and server releases don't collide in this shared repo). Versioned independently from the client — see `server/CLAUDE.md`'s Versioning section.
 - Config migrations for upgrades live in `migrate_config()` in `client/addon/globalPlugins/remoteClient/configuration.py`.
 
