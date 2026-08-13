@@ -179,7 +179,7 @@ def _install_stub_modules():
 		for i, name in enumerate((
 			"VERTICAL", "HORIZONTAL", "ALL", "EXPAND", "BOTTOM", "ALIGN_RIGHT",
 			"OK", "CANCEL", "YES", "NO", "YES_NO", "CANCEL_DEFAULT", "CENTRE",
-			"ICON_ERROR", "ICON_WARNING", "ICON_EXCLAMATION", "ITEM_CHECK",
+			"ICON_ERROR", "ICON_WARNING", "ICON_EXCLAMATION", "ICON_INFORMATION", "ITEM_CHECK",
 			"CENTER_ON_SCREEN", "NO_DEFAULT", "BOTH", "Center",
 		)):
 			setattr(wx, name, 1 << i)
@@ -187,6 +187,10 @@ def _install_stub_modules():
 		wx.EVT_BUTTON = "EVT_BUTTON"
 		wx.EVT_MENU = "EVT_MENU"
 		wx.version = lambda: ("4", "0", "0")
+		# Synchronous by default (real wx.CallAfter defers to the next event
+		# loop iteration) - fine for tests driving handlers directly; tests
+		# that care about the deferral itself patch this per-test.
+		wx.CallAfter = lambda f, *a, **kw: f(*a, **kw)
 		sys.modules["wx"] = wx
 
 	if "gui" not in sys.modules:

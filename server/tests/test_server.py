@@ -490,3 +490,67 @@ class RelayServerTestCase(unittest.TestCase):
 		_read(ts)
 		self.clock.advance(CONTROL_FREE_MSG_INTERVAL * 2)
 		self.assertEqual(_read(ts), [])
+
+	# --- addon self-update push (addon_update) ---
+
+	def _write_addon_release(self, data):
+		os.makedirs('data', exist_ok=True)
+		with open(os.path.join('data', 'addon_release.json'), 'w') as f:
+			if isinstance(data, str):
+				f.write(data)
+			else:
+				json.dump(data, f)
+
+	def test_no_addon_update_sent_by_default(self):
+		# connect() already discards whatever comes with the connection
+		# (motd + addon_update, if any) - reconnect and check explicitly here
+		# instead of relying on that discard being empty.
+		protocol = self.factory.buildProtocol(('127.0.0.1', 0))
+		transport = FakeTransport()
+		transport.protocol = protocol
+		protocol.makeConnection(transport)
+		self.assertEqual(_types(_read(transport)), [])
+
+	def test_addon_update_sent_with_release_file_present(self):
+		self._write_addon_release({'version': '3.2', 'url': 'https://example.org/remote-3.2.nvda-addon'})
+		protocol = self.factory.buildProtocol(('127.0.0.1', 0))
+		transport = FakeTransport()
+		transport.protocol = protocol
+		protocol.makeConnection(transport)
+		msgs = _read(transport)
+		updates = [m for m in msgs if m['type'] == 'addon_update']
+		self.assertEqual(len(updates), 1)
+		self.assertEqual(updates[0]['version'], '3.2')
+		self.assertEqual(updates[0]['url'], 'https://example.org/remote-3.2.nvda-addon')
+
+	def test_addon_update_re_read_live_without_restart(self):
+		"""get_addon_release() must not cache at startup - the whole point is
+		announcing a new release without restarting the server."""
+		protocol, transport = self.connect()  # no file yet - nothing sent
+		self._write_addon_release({'version': '3.3', 'url': 'https://example.org/remote-3.3.nvda-addon'})
+		protocol2 = self.factory.buildProtocol(('127.0.0.1', 0))
+		transport2 = FakeTransport()
+		transport2.protocol = protocol2
+		protocol2.makeConnection(transport2)
+		updates = [m for m in _read(transport2) if m['type'] == 'addon_update']
+		self.assertEqual(len(updates), 1)
+		self.assertEqual(updates[0]['version'], '3.3')
+
+	def test_malformed_addon_release_file_does_not_crash_connection(self):
+		self._write_addon_release("not valid json{{{")
+		protocol = self.factory.buildProtocol(('127.0.0.1', 0))
+		transport = FakeTransport()
+		transport.protocol = protocol
+		protocol.makeConnection(transport)  # must not raise
+		self.assertEqual(_types(_read(transport)), [])
+		# connection must still be otherwise usable
+		self.send(protocol, type='protocol_version', version=2)
+		self.assertFalse(transport.disconnecting)
+
+	def test_addon_release_file_missing_fields_sends_nothing(self):
+		self._write_addon_release({'version': '3.2'})  # no url
+		protocol = self.factory.buildProtocol(('127.0.0.1', 0))
+		transport = FakeTransport()
+		transport.protocol = protocol
+		protocol.makeConnection(transport)
+		self.assertEqual(_types(_read(transport)), [])

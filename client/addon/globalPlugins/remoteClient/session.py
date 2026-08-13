@@ -74,7 +74,7 @@ import tones
 import ui
 from speech.extensions import speechCanceled
 
-from . import configuration, connection_info, cues, nvda_patcher
+from . import addon_update, configuration, connection_info, cues, nvda_patcher
 
 from .localMachine import LocalMachine
 from .protocol import RemoteMessageType
@@ -124,6 +124,9 @@ class RemoteSession:
 			RemoteMessageType.version_mismatch, self.handleVersionMismatch
 		)
 		self.transport.registerInbound(RemoteMessageType.motd, self.handleMOTD)
+		self.transport.registerInbound(
+			RemoteMessageType.addon_update, addon_update.handleAddonUpdate
+		)
 		self.transport.registerInbound(
 			RemoteMessageType.speak, self.localMachine.speak
 		)

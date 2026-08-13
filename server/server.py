@@ -48,6 +48,12 @@ DATA_DIR = "data"
 AUTH_KEYS_FILE = os.path.join(DATA_DIR, "authorized_keys.json")
 SEEN_KEYS_FILE = os.path.join(DATA_DIR, "seen_keys.json")
 ADMIN_TOKEN_FILE = os.path.join(DATA_DIR, "admin.token")
+# {"version": "3.2", "url": "https://.../remote-3.2.nvda-addon"} - written by
+# the release process, read fresh on every connection (see
+# ServerState.get_addon_release) rather than cached at startup, so announcing
+# a new client release never requires restarting the server. Absent/empty is
+# the default "nothing to push" state.
+ADDON_RELEASE_FILE = os.path.join(DATA_DIR, "addon_release.json")
 
 class Channel(object):
 	def __init__(self, key, server_state=None):
@@ -236,6 +242,7 @@ class Handler(LineReceiver):
 		self.user = User(protocol=self)
 		self.cleanup_timer = self.user.server_state.clock.callLater(INITIAL_TIMEOUT, self.cleanup)
 		self.user.send_motd()
+		self.user.send_addon_update()
 
 	def connectionLost(self, reason):
 		log.msg("Connection %d lost, bytes sent: %d received: %d" % (self.connection_id, self.bytes_sent, self.bytes_received))
@@ -543,6 +550,17 @@ class User(object):
 		if self.server_state.motd is not None:
 			self.send(type='motd', motd=self.server_state.motd)
 
+	def send_addon_update(self):
+		# Sent to every connection unconditionally, same as send_motd (before
+		# join/authorization) - a quarantined/unauthorized client is exactly
+		# the one that can't be reached any other way to tell it to update.
+		# One consequence: the addon_release.json url is reachable by any
+		# host that can open a TCP connection to the relay, not just
+		# authorized ones - treat its contents as effectively public.
+		version, url = self.server_state.get_addon_release()
+		if version and url:
+			self.send(type='addon_update', version=version, url=url)
+
 class RemoteServerFactory(Factory):
 	def __init__(self, server_state):
 		self.server_state = server_state
@@ -627,6 +645,28 @@ class ServerState(object):
 			self.seen_keys.remove(key)
 			self.save_seen_keys()
 			log.msg(f"Key removed from seen list: {key}")
+
+	def get_addon_release(self):
+		"""Reads ADDON_RELEASE_FILE fresh on every call (see the comment on
+		that constant) and returns (version, url), or (None, None) if there's
+		nothing to push. Never raises - this runs from Handler.connectionMade,
+		before anything else about the connecting client is known, so a
+		missing/malformed/half-written file must degrade to "push nothing"
+		rather than break every new connection (same precedent as
+		load_seen_keys' bare except)."""
+		try:
+			if not os.path.exists(ADDON_RELEASE_FILE):
+				return None, None
+			with open(ADDON_RELEASE_FILE, 'r') as f:
+				data = json.load(f)
+			version = data.get('version')
+			url = data.get('url')
+			if not version or not url:
+				return None, None
+			return version, url
+		except Exception as e:
+			log.err(f"Failed to read addon release info: {e}")
+			return None, None
 
 	def load_or_generate_admin_token(self):
 		if os.path.exists(ADMIN_TOKEN_FILE):

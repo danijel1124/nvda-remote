@@ -20,7 +20,7 @@ scons mergePot    # merge extracted strings into existing locale .po files
 
 Linting: a flake8 config exists at `flake8.ini` (NVDA add-on template config: tabs, max-line-length 110, max-complexity 15) but is not wired into scons or CI — run manually, e.g. `flake8 --append-config=flake8.ini addon/globalPlugins/remoteClient`.
 
-`tests/` holds logic-level regression tests for `menu.py`/`dialogs.py`/`connection_info.py` (item-enablement state machine, session picker, config round-trip), run with the *system* `python3` (needs `configobj`, not NVDA-only):
+`tests/` holds logic-level regression tests for `menu.py`/`dialogs.py`/`connection_info.py`/`addon_update.py` (item-enablement state machine, session picker, config round-trip, self-update version-gating), run with the *system* `python3` (needs `configobj`, not NVDA-only):
 ```bash
 python3 -m unittest discover -s tests -v
 ```
@@ -43,6 +43,7 @@ Layering, roughly bottom-up:
 - **`configuration.py`** — `configobj`-based `remote.ini` handling with a strict configspec. Notably: `key` (session name) is force-set to `socket.gethostname()` on load, overriding anything else; `migrate_config()` handles upgrades between config versions (including legacy admin-token migration, prompting via a dialog); `minify_config()` strips config entries not present in the configspec (wired to the menu's "Clean up configuration..." item).
 - **`secureDesktop.py`** — keeps a slave session alive across NVDA's secure-desktop switch (UAC prompts, lock screen) by relaying through a `bridge.py`/local relay (`server.py` in this package — a small `LocalRelayServer`/`Client` pair, distinct from the top-level `server/` project — used only for this loopback secure-desktop bridging, not for real remote relaying).
 - **`url_handler.py`** — registers the `nvdaremote://` URL protocol (Windows registry) so links can trigger `RemoteClient.verifyAndConnect`.
+- **`addon_update.py`** (v3.2) — self-update, pushed by the server via `addon_update` (registered in `RemoteSession.__init__`, so it fires on both master and slave connections). `last_handled_version`/`last_handled_failed` in config are the *primary* gate (checked before comparing against the installed version), not just a dedup convenience: `addonHandler.getCodeAddon().version` still reports the old version until NVDA is restarted to complete a pending install, so gating on the installed version alone would re-download and reinstall the same update on every `ConnectorThread` reconnect. Downloads (plain `urllib`, normal cert validation — deliberately not inheriting the relay transport's `insecure`/trust-fingerprint state) and installs (`addonHandler.AddonBundle`/`installAddonBundle`, the two public entry points — no private `gui.addonGui` helpers, since none of this can be import-tested outside NVDA) happen on a background thread; NVDA is never auto-restarted, only announced — a screen-reader user losing NVDA mid-task without warning is worse than a delayed update. Never auto-downgrades: only a strictly newer version triggers anything. `installAddonBundle` only extracts the new version to a pending-install path — it does *not* remove a same-ID existing install on its own (confirmed by reading NVDA core's source), so the old add-on's `requestRemove()` must be called too, same as `gui.addonGui.installAddon` does.
 
 ## Notes for changes
 

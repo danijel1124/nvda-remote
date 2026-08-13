@@ -35,6 +35,17 @@ configspec = StringIO("""
 
 [ui]
 	play_sounds = boolean(default=True)
+
+[addon_update]
+	# The last version we've already downloaded+installed (or tried and
+	# failed to) via the server's addon_update push - see addon_update.py.
+	# This is the *primary* gate on whether to act on a new push, not just a
+	# dedup convenience: addonHandler.getCodeAddon().version keeps reporting
+	# the old version until NVDA is restarted to complete a pending install,
+	# so comparing only against the installed version would re-download and
+	# re-install the same update on every reconnect.
+	last_handled_version = string(default="")
+	last_handled_failed = boolean(default=False)
 """)
 def get_config():
 	global _config

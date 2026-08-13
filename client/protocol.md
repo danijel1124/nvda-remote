@@ -328,6 +328,28 @@ Added in v3.2 (client) / alongside it (server). Every message here is new, so an
 
 Take-over/release reuses the existing `key` message rather than adding a new wire type for the gesture itself: a plain F10 key-down from a non-controller master takes control if nobody currently controls the channel (denied via `control_denied` if someone already does); a plain F10 from the *current* controller is left alone and relayed as an ordinary keystroke; Alt+F10 from the controller releases control (the server also synthesizes a matching Alt key-up to the slave, so the controlled machine never sees a stuck Alt modifier from the interrupted chord).
 
+### Self-Update Push
+
+Added in v3.2. Sent unconditionally by the server on every new connection (like `motd`, before `join`/authorization - a quarantined or already-outdated client is exactly the one that most needs to be told to update).
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "addon_update": {
+      "type": "object",
+      "description": "Server to client: the add-on version the server expects clients to run, and where to get it. The client compares this to its own installed version and, if strictly newer, downloads and installs it automatically (no downgrade, ever - a version equal to or older than what's installed is ignored). Installing a new bundle only takes effect after NVDA is restarted; the client announces this rather than restarting NVDA on its own.",
+      "properties": {
+        "type": { "const": "addon_update" },
+        "version": { "type": "string", "description": "Dotted-numeric, e.g. \"3.2\"." },
+        "url": { "type": "string", "description": "Direct download URL for the .nvda-addon file." }
+      },
+      "required": ["type", "version", "url"]
+    }
+  }
+}
+```
+
 ## Security Considerations
 
 - All connections are encrypted using SSL/TLS.
