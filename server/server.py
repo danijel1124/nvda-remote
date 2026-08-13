@@ -1,7 +1,7 @@
 from twisted.internet.protocol import Protocol, Factory, defer
 from twisted.python.modules import getModule
 from twisted.python import log
-from twisted.internet import ssl, reactor
+from twisted.internet import ssl, reactor, threads
 from twisted.protocols.basic import LineReceiver
 from twisted.internet.task import LoopingCall
 from twisted.python import usage
@@ -15,8 +15,18 @@ import time
 import random
 import string
 import secrets
+import update_check
 
 log.startLogging(sys.stdout)
+
+# Versioned independently from the client add-on (see buildVars.py's
+# addon_version) - the two are separate sub-projects sharing one repo and
+# one wire protocol, not a single lockstep release train. This is the
+# server's first formal version number; it was never versioned before,
+# despite carrying substantial features (whitelist/quarantine, admin API,
+# controller/observer model, add-on self-update push) - 1.0.0 marks that
+# first tagged/released baseline, not a "rewrite" or a reset of history.
+SERVER_VERSION = "1.0.0"
 
 PING_INTERVAL = 300
 INITIAL_TIMEOUT = 30
@@ -54,6 +64,29 @@ ADMIN_TOKEN_FILE = os.path.join(DATA_DIR, "admin.token")
 # a new client release never requires restarting the server. Absent/empty is
 # the default "nothing to push" state.
 ADDON_RELEASE_FILE = os.path.join(DATA_DIR, "addon_release.json")
+
+# How often (a base tick, not the actual check interval) the server looks at
+# data/server_config.json to decide whether a scheduled self-update check is
+# due (see update_check.is_check_due/get_configured_interval_hours). Ticking
+# hourly and checking "is it due yet" internally - rather than restarting a
+# LoopingCall whenever the configured interval changes - means the interval
+# is adjustable via a plain file write, no server restart needed, same as
+# ADDON_RELEASE_FILE above.
+UPDATE_CHECK_TICK_INTERVAL = 3600.0
+
+
+def _scheduled_update_check():
+	"""Called every UPDATE_CHECK_TICK_INTERVAL by a LoopingCall in main().
+	Only actually hits GitHub when update_check.is_check_due() says it's
+	time (per the configured interval, default 24h - see
+	update_check.DEFAULT_INTERVAL_HOURS). The real HTTP call is blocking,
+	so it must never run directly on the reactor thread - deferToThread
+	hands it to Twisted's thread pool instead, so a slow/hung GitHub
+	request can never stall relaying for connected clients.
+	"""
+	if update_check.is_check_due(DATA_DIR):
+		threads.deferToThread(update_check.check_for_update, SERVER_VERSION, DATA_DIR, log.msg)
+
 
 class Channel(object):
 	def __init__(self, key, server_state=None):
@@ -731,6 +764,7 @@ class Options(usage.Options):
 	]
 
 def main():
+	log.msg(f"NVDA Remote relay server {SERVER_VERSION} starting")
 	config = Options()
 	config.parseOptions()
 	privkey = open(config['privkey']).read()
@@ -749,6 +783,12 @@ def main():
 	f = RemoteServerFactory(state)
 	l = LoopingCall(f.ping_connected_clients)
 	l.start(PING_INTERVAL)
+	# now=True so a fresh deployment (no data/server_update_check.json yet)
+	# checks once on startup rather than waiting a full tick; on a restart
+	# with a recent check already on record, is_check_due() makes this a
+	# no-op until the configured interval has actually elapsed.
+	update_check_loop = LoopingCall(_scheduled_update_check)
+	update_check_loop.start(UPDATE_CHECK_TICK_INTERVAL, now=True)
 	f.protocol = Handler
 	reactor.listenSSL(int(config['port']), f, context_factory, interface=config['network-interface'])
 	reactor.run()

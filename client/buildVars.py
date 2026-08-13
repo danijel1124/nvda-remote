@@ -25,7 +25,7 @@ addon_info = {
 	# URL for the add-on documentation support
 	"addon_url" : "https://NVDARemote.com",
 	# URL for the add-on repository where the source code can be found
-	"addon_sourceURL": "https://github.com/danijel1124/remote-server",
+	"addon_sourceURL": "https://github.com/danijel1124/nvda-remote",
 	# Documentation file name
 	"addon_docFileName" : "readme.html",
 	# Minimum NVDA version supported (e.g. "2018.3.0", minor version is optional)
