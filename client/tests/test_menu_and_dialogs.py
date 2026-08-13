@@ -229,6 +229,16 @@ def _install_stub_modules():
 		gui.guiHelper = _GuiHelper()
 		sys.modules["gui"] = gui
 
+	if "ui" not in sys.modules:
+		ui = types.ModuleType("ui")
+		ui.messages = []  # tests can inspect/clear this to check what was spoken
+
+		def _message(text, *a, **kw):
+			ui.messages.append(text)
+
+		ui.message = _message
+		sys.modules["ui"] = ui
+
 
 def _load_remoteclient_submodules():
 	"""Import menu/dialogs/connection_info/configuration directly, bypassing
@@ -251,11 +261,17 @@ def _load_remoteclient_submodules():
 connection_info, configuration, menu, dialogs = _load_remoteclient_submodules()
 ConnectionMode = connection_info.ConnectionMode
 ConnectionInfo = connection_info.ConnectionInfo
+import wx  # noqa: E402 - the stub installed into sys.modules above
+import ui  # noqa: E402 - ditto
 
 
 class FakeClient:
 	"""Stand-in for RemoteClient - RemoteMenu only calls bound methods on it,
 	never inspects state, so a set of no-op callables is enough."""
+	def __init__(self):
+		self.slaveSession = None
+		self.masterSession = None
+
 	def doConnect(self, *a, **kw): pass
 	def showControlAnotherComputer(self, *a, **kw): pass
 	def onShowAdmin(self, *a, **kw): pass
@@ -264,6 +280,12 @@ class FakeClient:
 	def pushClipboard(self, *a, **kw): pass
 	def copyLink(self, *a, **kw): pass
 	def sendSAS(self, *a, **kw): pass
+
+
+class FakeSession:
+	def __init__(self, serverVersion=None, serverUpdateCheck=None):
+		self.serverVersion = serverVersion
+		self.serverUpdateCheck = serverUpdateCheck
 
 
 class MenuStateMachineTests(unittest.TestCase):
@@ -360,12 +382,74 @@ class MenuStateMachineTests(unittest.TestCase):
 		self.assertFalse(m.disconnectItem.enabled)
 
 	def test_terminate_does_not_raise(self):
-		"""terminate() touches eleven item references (including the two new
-		ones and the pre-existing adminItem/cleanupItem cleanup) and runs on
-		every NVDA shutdown and addon reload - the one method here otherwise
-		with no coverage at all."""
+		"""terminate() touches twelve item references (including
+		serverInfoItem and the pre-existing adminItem/cleanupItem cleanup)
+		and runs on every NVDA shutdown and addon reload - the one method
+		here otherwise with no coverage at all."""
 		m = self.remoteMenu
 		m.terminate()
+
+	def test_server_info_item_enabled_alongside_admin_item(self):
+		m = self.remoteMenu
+		self.assertFalse(m.serverInfoItem.enabled)
+		m.handleConnecting(ConnectionMode.SLAVE)
+		m.handleConnected(ConnectionMode.SLAVE, True)
+		self.assertTrue(m.serverInfoItem.enabled)
+
+
+class ServerInfoMenuItemTests(unittest.TestCase):
+	def setUp(self):
+		ui.messages.clear()
+
+	def test_announces_not_available_when_never_connected(self):
+		client = FakeClient()
+		m = menu.RemoteMenu(client)
+		m.onServerInfoItem(wx.CommandEvent())
+		self.assertIn("not available", ui.messages[-1])
+
+	def test_announces_server_version_from_slave_session(self):
+		client = FakeClient()
+		client.slaveSession = FakeSession(serverVersion="1.1.0")
+		m = menu.RemoteMenu(client)
+		m.onServerInfoItem(wx.CommandEvent())
+		self.assertIn("1.1.0", ui.messages[-1])
+
+	def test_prefers_slave_session_over_master_session(self):
+		client = FakeClient()
+		client.slaveSession = FakeSession(serverVersion="1.1.0")
+		client.masterSession = FakeSession(serverVersion="9.9.9")
+		m = menu.RemoteMenu(client)
+		m.onServerInfoItem(wx.CommandEvent())
+		self.assertIn("1.1.0", ui.messages[-1])
+		self.assertNotIn("9.9.9", ui.messages[-1])
+
+	def test_falls_back_to_master_session_when_no_slave(self):
+		client = FakeClient()
+		client.masterSession = FakeSession(serverVersion="1.1.0")
+		m = menu.RemoteMenu(client)
+		m.onServerInfoItem(wx.CommandEvent())
+		self.assertIn("1.1.0", ui.messages[-1])
+
+	def test_mentions_available_update(self):
+		client = FakeClient()
+		client.slaveSession = FakeSession(
+			serverVersion="1.0.0",
+			serverUpdateCheck={'update_available': True, 'latest_version': '1.1.0'},
+		)
+		m = menu.RemoteMenu(client)
+		m.onServerInfoItem(wx.CommandEvent())
+		self.assertIn("1.0.0", ui.messages[-1])
+		self.assertIn("1.1.0", ui.messages[-1])
+
+	def test_does_not_mention_update_when_up_to_date(self):
+		client = FakeClient()
+		client.slaveSession = FakeSession(
+			serverVersion="1.1.0",
+			serverUpdateCheck={'update_available': False, 'latest_version': None},
+		)
+		m = menu.RemoteMenu(client)
+		m.onServerInfoItem(wx.CommandEvent())
+		self.assertNotIn("available", ui.messages[-1])
 
 
 class ControlAnotherComputerDialogTests(unittest.TestCase):

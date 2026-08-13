@@ -12,7 +12,10 @@ Two things this deliberately does NOT do:
 - Never restart NVDA automatically: installAddonBundle only marks the update
   as pending until NVDA restarts (NVDA can't hot-swap already-imported code),
   and silently restarting out from under a screen-reader user mid-task would
-  be worse than a delayed update. We announce and let the user decide when.
+  be worse than a delayed update. We announce and *offer* an immediate
+  restart (a Yes/No dialog, core.restart() only on an explicit Yes) rather
+  than forcing one - the choice of when stays the user's, just one click
+  away instead of a manual detour through NVDA's own restart command.
 
 See client/CLAUDE.md for the full design (including why last_handled_version
 must be checked *before* the installed version, not just as a dedup).
@@ -24,6 +27,7 @@ import urllib.error
 import urllib.request
 
 import addonHandler
+import core
 import gui
 import ui
 import wx
@@ -159,11 +163,13 @@ def _markHandled(version, failed):
 def _announceInstalled(version):
 	# Translators: presented after NVDA Remote silently downloaded and
 	# installed a newer version pushed by the control server. Restarting is
-	# required to actually run it; that choice is left to the user rather
-	# than forced.
+	# required to actually run it; offered as a one-click choice rather than
+	# forced or left as a manual "remember to restart later" task.
 	msg = _(
 		"NVDA Remote has been updated to version {version}. "
-		"Restart NVDA to start using it."
+		"Do you want to restart NVDA now to start using it?"
 	).format(version=version)
 	ui.message(msg)
-	gui.messageBox(msg, _("NVDA Remote Updated"), wx.OK | wx.ICON_INFORMATION)
+	result = gui.messageBox(msg, _("NVDA Remote Updated"), wx.YES_NO | wx.ICON_INFORMATION)
+	if result == wx.YES:
+		core.restart()

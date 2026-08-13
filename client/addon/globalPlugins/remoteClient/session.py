@@ -128,6 +128,11 @@ class RemoteSession:
 			RemoteMessageType.addon_update, addon_update.handleAddonUpdate
 		)
 		self.transport.registerInbound(
+			RemoteMessageType.server_info, self.handleServerInfo
+		)
+		self.serverVersion: Optional[str] = None
+		self.serverUpdateCheck: Optional[dict] = None
+		self.transport.registerInbound(
 			RemoteMessageType.speak, self.localMachine.speak
 		)
 		self.transport.registerInbound(
@@ -144,6 +149,18 @@ class RemoteSession:
 	def handlePing(self) -> None:
 		"""Handle ping from server by sending a pong response."""
 		self.transport.send(RemoteMessageType.pong)
+
+	def handleServerInfo(self, version: Optional[str] = None, update_check: Optional[dict] = None) -> None:
+		"""The connected relay server's own version (and, if it has one,
+		its last known self-update-check result) - sent unconditionally by
+		the server, not just to admins (v3.2.3). Stored for on-demand
+		display (menu.py's "Server information" item and the admin GUI's
+		server-version label) rather than proactively announced - a modal
+		or speech interruption on every single connect would be too
+		intrusive for something this low-stakes.
+		"""
+		self.serverVersion = version
+		self.serverUpdateCheck = update_check
 
 	def registerCallbacks(self) -> None:
 		"""Register all callback handlers for this session.

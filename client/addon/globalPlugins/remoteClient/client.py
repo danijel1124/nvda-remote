@@ -91,6 +91,7 @@ class RemoteClient:
 		self._admin_authenticated = False
 		self._auto_reauth_pending = False
 		self._awaitingSessionList = False
+		self._awaitingUpdateCheck = False
 		self.hookThread = None
 		self.sendingKeys = False
 		try:
@@ -231,6 +232,7 @@ class RemoteClient:
 		if self._admin_transport is self.masterSession.transport:
 			self._admin_transport = None
 			self._admin_authenticated = False
+			self._awaitingUpdateCheck = False
 		self.masterSession.close()
 		self.masterSession = None
 		self.masterTransport = None
@@ -239,6 +241,7 @@ class RemoteClient:
 		if self._admin_transport is self.slaveSession.transport:
 			self._admin_transport = None
 			self._admin_authenticated = False
+			self._awaitingUpdateCheck = False
 		self.slaveSession.close()
 		self.slaveSession = None
 		self.slaveTransport = None
@@ -325,16 +328,25 @@ class RemoteClient:
 		# transport since _get_active_transport prefers slave too) must be
 		# left alone here - swallowing them would both show a wrong message
 		# and clear the flag, dropping the real session_list that follows.
-		if not getattr(self, "_awaitingSessionList", False):
+		if getattr(self, "_awaitingSessionList", False) and error == "not_authorized":
+			self._awaitingSessionList = False
+			gui.messageBox(
+				_("Could not list other computers: this computer is not yet authorized on the control server."),
+				_("Error"),
+				wx.OK | wx.ICON_ERROR,
+			)
 			return
-		if error != "not_authorized":
-			return
-		self._awaitingSessionList = False
-		gui.messageBox(
-			_("Could not list other computers: this computer is not yet authorized on the control server."),
-			_("Error"),
-			wx.OK | wx.ICON_ERROR,
-		)
+		# admin_check_for_updates against a server too old to know that
+		# command (pre-1.1.0) comes back as a plain error/unknown_admin_command
+		# instead of admin_update_check_response - without this, the "Check
+		# for updates now" button (disabled while the request is in flight)
+		# would stay disabled forever, since only
+		# show_update_check_results/handle_update_check_response re-enables it.
+		if getattr(self, "_awaitingUpdateCheck", False):
+			self._awaitingUpdateCheck = False
+			if self.admin_ui:
+				failure = {'error': error or 'unknown error'}
+				self.admin_ui.show_update_check_results(failure, failure)
 
 	def connectToTarget(self, key: str):
 		if self.isConnectedAsMaster() or not self.isConnectedAsSlave():
@@ -726,6 +738,12 @@ class RemoteClient:
 		t = self._get_active_transport()
 		if t: t.send(RemoteMessageType.admin_remove_channel, key=key)
 
+	def send_admin_check_for_updates(self):
+		t = self._get_active_transport()
+		if t:
+			self._awaitingUpdateCheck = True
+			t.send(RemoteMessageType.admin_check_for_updates)
+
 	def _maybe_reauth_admin(self, transport):
 		"""Called whenever a transport (re)connects. RelayTransport reconnects
 		silently on a dropped connection (ConnectorThread) without tearing the
@@ -750,6 +768,7 @@ class RemoteClient:
 		transport.registerInbound(RemoteMessageType.auth_admin_response, self.handle_auth_response)
 		transport.registerInbound(RemoteMessageType.admin_channel_list, self.handle_channel_list)
 		transport.registerInbound(RemoteMessageType.admin_response, self.handle_admin_response)
+		transport.registerInbound(RemoteMessageType.admin_update_check_response, self.handle_update_check_response)
 
 	def handle_auth_response(self, success=False):
 		self._admin_authenticated = success
@@ -774,3 +793,8 @@ class RemoteClient:
 	def handle_admin_response(self, command=None, success=False, key=None):
 		if success:
 			self.send_admin_list_req() # Refresh list
+
+	def handle_update_check_response(self, server=None, client=None):
+		self._awaitingUpdateCheck = False
+		if self.admin_ui:
+			self.admin_ui.show_update_check_results(server, client)

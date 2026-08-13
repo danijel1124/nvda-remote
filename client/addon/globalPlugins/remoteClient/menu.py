@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 
 import gui
+import ui
 
 from .connection_info import ConnectionMode
 
@@ -22,6 +23,7 @@ class RemoteMenu(wx.Menu):
 	sendCtrlAltDelItem: wx.MenuItem
 	controlAnotherComputerItem: wx.MenuItem
 	disconnectFromTargetItem: wx.MenuItem
+	serverInfoItem: wx.MenuItem
 	remoteItem: wx.MenuItem
 
 	def __init__(self, client: "RemoteClient") -> None:
@@ -122,6 +124,13 @@ class RemoteMenu(wx.Menu):
 		)
 		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.onCleanupItem, self.cleanupItem)
 
+		# Translators: Menu item in NVDA Remote submenu to announce the connected relay server's version.
+		self.serverInfoItem: wx.MenuItem = self.Append(
+			wx.ID_ANY, _("Relay server information"), _("Announce the version of the connected relay server")
+		)
+		self.serverInfoItem.Enable(False)
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.onServerInfoItem, self.serverInfoItem)
+
 		# Translators: Label of menu in NVDA tools menu.
 		self.remoteItem = toolsMenu.AppendSubMenu(
 			self, _("R&emote"), _("NVDA Remote Access")
@@ -158,6 +167,9 @@ class RemoteMenu(wx.Menu):
 		self.Remove(self.cleanupItem.Id)
 		self.cleanupItem.Destroy()
 		self.cleanupItem = None
+		self.Remove(self.serverInfoItem.Id)
+		self.serverInfoItem.Destroy()
+		self.serverInfoItem = None
 		tools_menu = gui.mainFrame.sysTrayIcon.toolsMenu
 		tools_menu.Remove(self.remoteItem.Id)
 		self.remoteItem.Destroy()
@@ -195,6 +207,26 @@ class RemoteMenu(wx.Menu):
 		from . import configuration
 		configuration.minify_config(gui.mainFrame)
 
+	def onServerInfoItem(self, evt: wx.CommandEvent) -> None:
+		evt.Skip()
+		# Prefer the slave (control-server) session - it's the always-on
+		# baseline connection; a master session (controlling another
+		# machine) talks to the same server in practice (session discovery
+		# only lists other sessions on the same server), but slave is the
+		# more likely one to actually be present.
+		session = self.client.slaveSession or self.client.masterSession
+		if session is None or session.serverVersion is None:
+			# Translators: Reported when the relay server's version isn't known yet (e.g. not connected).
+			ui.message(_("Relay server version not available"))
+			return
+		# Translators: Reports the connected relay server's version, %s is replaced with the version number.
+		message = _("Relay server version %s") % session.serverVersion
+		updateCheck = session.serverUpdateCheck
+		if updateCheck and updateCheck.get('update_available') and updateCheck.get('latest_version'):
+			# Translators: Appended when a newer relay server version is known to be available, %s is the version number.
+			message += " " + _("A newer server version %s is available") % updateCheck['latest_version']
+		ui.message(message)
+
 	def handleConnected(self, mode: ConnectionMode, connected: bool) -> None:
 		if mode == ConnectionMode.MASTER:
 			self._masterConnected = connected
@@ -220,6 +252,7 @@ class RemoteMenu(wx.Menu):
 		# requires not already controlling one.
 		self.controlAnotherComputerItem.Enable(self._slaveConnected and not self._masterConnected)
 		self.adminItem.Enable(anyConnected)
+		self.serverInfoItem.Enable(anyConnected)
 
 	def handleConnecting(self, mode: ConnectionMode) -> None:
 		self.disconnectItem.Enable(True)

@@ -9,7 +9,9 @@ free reminder loops can be advanced deterministically without real waiting.
 """
 import json
 import os
+from unittest import mock
 
+from twisted.internet import defer
 from twisted.internet.task import Clock
 from twisted.test.proto_helpers import StringTransportWithDisconnection
 from twisted.trial import unittest
@@ -552,7 +554,9 @@ class RelayServerTestCase(unittest.TestCase):
 	def test_no_addon_update_sent_by_default(self):
 		# connect() already discards whatever comes with the connection
 		# (motd + addon_update, if any) - reconnect and check explicitly here
-		# instead of relying on that discard being empty.
+		# instead of relying on that discard being empty. server_info is
+		# request/response only (v1.1.0, NOT unconditional like motd - see
+		# get_server_info's docstring for why), so nothing extra here.
 		protocol = self.factory.buildProtocol(('127.0.0.1', 0))
 		transport = FakeTransport()
 		transport.protocol = protocol
@@ -602,3 +606,110 @@ class RelayServerTestCase(unittest.TestCase):
 		transport.protocol = protocol
 		protocol.makeConnection(transport)
 		self.assertEqual(_types(_read(transport)), [])
+
+	# --- server_info (v1.1.0, request/response, not an unconditional push -
+	# see get_server_info's docstring: an old client that doesn't recognize
+	# the type would log.error -> audible error.wav on every connect) ---
+
+	def test_server_info_not_sent_unprompted_on_connect(self):
+		"""Regression guard for the actual bug this design avoids: nothing
+		with type server_info may ever arrive before the client asks for
+		it, since a pre-3.2.3 client has no 'server_info' in its
+		RemoteMessageType enum and would error.wav on it."""
+		protocol, transport = self._connect_raw()
+		self.assertEqual(_types(_read(transport)), [])
+
+	def test_get_server_info_returns_current_version(self):
+		p, t = self._connect_raw()
+		_read(t)
+		self.send(p, type='get_server_info')
+		info = [m for m in _read(t) if m['type'] == 'server_info'][0]
+		self.assertEqual(info['version'], server_module.SERVER_VERSION)
+
+	def test_get_server_info_works_before_join(self):
+		p, t = self._connect_raw()
+		_read(t)
+		self.send(p, type='get_server_info')  # no protocol_version/join sent first
+		self.assertEqual(_types(_read(t)), ['server_info'])
+
+	def test_get_server_info_works_after_join(self):
+		p, t = self.join('pcA', 'slave')
+		self.send(p, type='get_server_info')
+		self.assertEqual(_types(_read(t)), ['server_info'])
+
+	def test_server_info_update_check_is_none_by_default(self):
+		p, t = self._connect_raw()
+		_read(t)
+		self.send(p, type='get_server_info')
+		info = [m for m in _read(t) if m['type'] == 'server_info'][0]
+		self.assertIsNone(info['update_check'])
+
+	def test_server_info_includes_last_known_update_check(self):
+		os.makedirs('data', exist_ok=True)
+		with open(os.path.join('data', 'server_update_check.json'), 'w') as f:
+			json.dump({'checked_at': 123.0, 'current_version': '1.0.0',
+						'latest_version': '1.1.0', 'update_available': True,
+						'url': 'https://example.org/server-v1.1.0', 'error': None}, f)
+		p, t = self._connect_raw()
+		_read(t)
+		self.send(p, type='get_server_info')
+		info = [m for m in _read(t) if m['type'] == 'server_info'][0]
+		self.assertEqual(info['update_check']['latest_version'], '1.1.0')
+
+	def _connect_raw(self):
+		"""Like connect(), but without discarding the initial messages -
+		needed to inspect what's sent right at connectionMade."""
+		protocol = self.factory.buildProtocol(('127.0.0.1', 0))
+		transport = FakeTransport()
+		transport.protocol = protocol
+		protocol.makeConnection(transport)
+		return protocol, transport
+
+	def test_server_info_not_folded_into_auth_admin_response(self):
+		# Regression guard: this must stay a separate message type, not a
+		# new field on auth_admin_response - see do_admin_check_for_updates'
+		# docstring for why (fixed, non-**kwargs client handler signature).
+		p, t = self.connect()
+		self.send(p, type='auth_admin', token=self.state.admin_token)
+		auth_response = [m for m in _read(t) if m['type'] == 'auth_admin_response'][0]
+		self.assertNotIn('version', auth_response)
+
+	# --- admin-triggered remote update check ---
+
+	def test_admin_check_for_updates_requires_admin(self):
+		p, t = self.connect()
+		self.send(p, type='admin_check_for_updates')
+		msgs = _read(t)
+		self.assertEqual(msgs[0], {'type': 'error', 'error': 'access_denied'})
+
+	def test_admin_check_for_updates_triggers_check_and_responds(self):
+		p, t = self.connect()
+		self.send(p, type='auth_admin', token=self.state.admin_token)
+		_read(t)
+		fake_result = {
+			'server': {'current_version': '1.1.0', 'latest_version': '1.1.0', 'update_available': False, 'url': None, 'error': None},
+			'client': {'latest_version': '3.2.2', 'updated': False, 'url': None, 'error': None},
+		}
+		with mock.patch('server.threads.deferToThread', side_effect=lambda f, *a, **kw: defer.succeed(f(*a, **kw))):
+			with mock.patch('server.update_check.run_scheduled_checks', return_value=fake_result) as mock_run:
+				self.send(p, type='admin_check_for_updates')
+				msgs = _read(t)
+		mock_run.assert_called_once()
+		response = [m for m in msgs if m['type'] == 'admin_update_check_response'][0]
+		self.assertEqual(response['server']['latest_version'], '1.1.0')
+		self.assertEqual(response['client']['latest_version'], '3.2.2')
+
+	def test_admin_check_for_updates_bypasses_due_gate(self):
+		# An explicit "check now" must never be silently skipped because
+		# the daily timer isn't due yet - unlike the scheduled path, this
+		# doesn't consult is_check_due() at all.
+		p, t = self.connect()
+		self.send(p, type='auth_admin', token=self.state.admin_token)
+		_read(t)
+		with mock.patch('server.threads.deferToThread', side_effect=lambda f, *a, **kw: defer.succeed(f(*a, **kw))):
+			with mock.patch('server.update_check.is_check_due') as mock_is_due:
+				with mock.patch('server.update_check.run_scheduled_checks', return_value={'server': {}, 'client': {}}) as mock_run:
+					self.send(p, type='admin_check_for_updates')
+					_read(t)
+		mock_run.assert_called_once()
+		mock_is_due.assert_not_called()

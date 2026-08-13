@@ -33,8 +33,19 @@ jobs:
       - name: Run Scons
         run: scons
       - name: Create and Upload Release
-        if: contains(github.ref, '/tags/')
+        # Manual dispatch only - NOT on tag push. The established release
+        # playbook (see CLAUDE.md) is a local build + `gh release create`,
+        # verified by hand (curl -sIL content-length check) before
+        # `set_addon_release.py` advertises the URL to live clients. Auto-
+        # releasing here too on every 'v*' tag push would race that: two
+        # processes both trying to create/upload to the same release, with
+        # no guarantee which asset's bytes actually end up live. Trigger
+        # this manually (Actions tab -> Run workflow) only if deliberately
+        # switching to CI-built releases, and verify the asset by hand
+        # exactly as the manual playbook does before advertising it.
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ github.ref_name }}
           prerelease: ${{ endsWith(github.ref, '-dev') }}
           files: 'client/*.nvda-addon'

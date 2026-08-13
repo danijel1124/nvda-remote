@@ -351,6 +351,69 @@ Added in v3.2. Sent unconditionally by the server on every new connection (like 
 }
 ```
 
+### Server Version Info
+
+Added in v1.1.0 (server) / v3.2.3 (client). **Request/response, not an unconditional push** like `motd`/`addon_update` above - deliberately so. A client older than v3.2.3 has no `server_info` in its `RemoteMessageType` enum; if the server pushed it unconditionally, `RemoteMessageType(obj["type"])` would raise `ValueError` in that old client's `transport.py`'s `parse()`, logged as `log.error`, which NVDA turns into an audible `error.wav` on every single connect/reconnect. Since only a client that already knows the type would ever send `get_server_info` in the first place, an old client simply never asks and never receives a reply - safe either direction. Not admin-gated (the server's own version isn't sensitive), and works whether or not the client has joined a channel yet.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "get_server_info": {
+      "type": "object",
+      "description": "Client to server: ask for the server's version info. Sent by transport.py's onConnected, right alongside protocol_version/join, on every fresh connection.",
+      "properties": {
+        "type": { "const": "get_server_info" }
+      },
+      "required": ["type"]
+    },
+    "server_info": {
+      "type": "object",
+      "description": "Server to client, in response to get_server_info: the relay server's own version, and (if it has completed one) its last known self-update-check result. The client stores this for on-demand display (a menu item / the admin GUI) rather than announcing it proactively.",
+      "properties": {
+        "type": { "const": "server_info" },
+        "version": { "type": "string", "description": "Dotted-numeric, e.g. \"1.1.0\"." },
+        "update_check": {
+          "type": ["object", "null"],
+          "description": "Null if the server hasn't completed a self-update check yet. Otherwise {current_version, latest_version, update_available, url, error, checked_at} - see update_check.py's check_for_update()."
+        }
+      },
+      "required": ["type", "version"]
+    }
+  }
+}
+```
+
+### Admin-Triggered Update Check
+
+Added in v1.1.0 (server) / v3.2.3 (client). Admin-only (requires `auth_admin` first) - lets an admin trigger `update_check.py`'s GitHub checks (both the server's own self-update check and the client-release auto-detect/apply check) immediately, instead of only via the server's CLI or its daily scheduled check. Deliberately bypasses the scheduled check's due-gate.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "admin_check_for_updates": {
+      "type": "object",
+      "description": "Client to server, admin-only: check GitHub for updates right now.",
+      "properties": {
+        "type": { "const": "admin_check_for_updates" }
+      },
+      "required": ["type"]
+    },
+    "admin_update_check_response": {
+      "type": "object",
+      "description": "Server to client, in response to admin_check_for_updates. server/client are the raw result dicts from update_check.py's check_for_update()/check_for_client_update() respectively.",
+      "properties": {
+        "type": { "const": "admin_update_check_response" },
+        "server": { "type": "object" },
+        "client": { "type": "object" }
+      },
+      "required": ["type", "server", "client"]
+    }
+  }
+}
+```
+
 ## Security Considerations
 
 - All connections are encrypted using SSL/TLS.

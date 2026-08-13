@@ -30,6 +30,11 @@ def _load_addon_update_module():
 		ui.message = lambda *a, **kw: None
 		sys.modules["ui"] = ui
 
+	if "core" not in sys.modules:
+		core = types.ModuleType("core")
+		core.restart = mock.MagicMock(name="restart")
+		sys.modules["core"] = core
+
 	addonHandler = sys.modules["addonHandler"]
 	if not hasattr(addonHandler, "getCodeAddon"):
 		class _FakeAddon:
@@ -158,6 +163,27 @@ class DownloadAndInstallTests(unittest.TestCase):
 		self.assertEqual(conf["addon_update"]["last_handled_version"], "3.2")
 		self.assertFalse(conf["addon_update"]["last_handled_failed"])
 		self.assertFalse(addon_update._checking)
+
+	def test_offers_restart_and_restarts_on_yes(self):
+		fakeResponse = io.BytesIO(b"fake addon bytes")
+		with mock.patch.object(addon_update.urllib.request, "urlopen", return_value=fakeResponse), \
+			mock.patch.object(addon_update.wx, "CallAfter", side_effect=lambda f, *a: f(*a)), \
+			mock.patch.object(addon_update.gui, "messageBox", return_value=addon_update.wx.YES) as mockBox, \
+			mock.patch.object(addon_update, "core") as mockCore:
+			addon_update._downloadAndInstall("3.2", "https://example.org/x.nvda-addon")
+		mockBox.assert_called_once()
+		mockCore.restart.assert_called_once_with()
+
+	def test_does_not_restart_on_no(self):
+		"""The restart must stay opt-in - declining the offer must not
+		restart NVDA out from under the user anyway."""
+		fakeResponse = io.BytesIO(b"fake addon bytes")
+		with mock.patch.object(addon_update.urllib.request, "urlopen", return_value=fakeResponse), \
+			mock.patch.object(addon_update.wx, "CallAfter", side_effect=lambda f, *a: f(*a)), \
+			mock.patch.object(addon_update.gui, "messageBox", return_value=addon_update.wx.NO), \
+			mock.patch.object(addon_update, "core") as mockCore:
+			addon_update._downloadAndInstall("3.2", "https://example.org/x.nvda-addon")
+		mockCore.restart.assert_not_called()
 
 	def test_successful_install_removes_the_old_add_on(self):
 		"""installAddonBundle() only extracts the new version - by itself it

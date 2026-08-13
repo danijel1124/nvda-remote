@@ -649,6 +649,12 @@ class RelayTransport(TCPTransport):
 
 	def onConnected(self) -> None:
 		self.send(RemoteMessageType.protocol_version, version=self.protocol_version)
+		# Sent before join deliberately - see get_server_info's docstring in
+		# protocol.py. By the time the server processes this line it hasn't
+		# processed 'join' yet, so it's answered via the pre-join dispatch
+		# path (server.py's lineReceived) - not that it matters which path,
+		# both work, but this keeps the ordering simple to reason about.
+		self.send(RemoteMessageType.get_server_info)
 		if self.channel is not None:
 			self.send(
 				RemoteMessageType.join,

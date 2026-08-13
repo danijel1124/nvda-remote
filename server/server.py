@@ -26,7 +26,7 @@ log.startLogging(sys.stdout)
 # despite carrying substantial features (whitelist/quarantine, admin API,
 # controller/observer model, add-on self-update push) - 1.0.0 marks that
 # first tagged/released baseline, not a "rewrite" or a reset of history.
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 
 PING_INTERVAL = 300
 INITIAL_TIMEOUT = 30
@@ -79,13 +79,16 @@ def _scheduled_update_check():
 	"""Called every UPDATE_CHECK_TICK_INTERVAL by a LoopingCall in main().
 	Only actually hits GitHub when update_check.is_check_due() says it's
 	time (per the configured interval, default 24h - see
-	update_check.DEFAULT_INTERVAL_HOURS). The real HTTP call is blocking,
-	so it must never run directly on the reactor thread - deferToThread
+	update_check.DEFAULT_INTERVAL_HOURS). run_scheduled_checks() covers
+	both the server's own self-update check and auto-detecting/applying
+	the latest official client release to data/addon_release.json - one
+	configured interval governs both. The real HTTP calls are blocking,
+	so this must never run directly on the reactor thread - deferToThread
 	hands it to Twisted's thread pool instead, so a slow/hung GitHub
 	request can never stall relaying for connected clients.
 	"""
 	if update_check.is_check_due(DATA_DIR):
-		threads.deferToThread(update_check.check_for_update, SERVER_VERSION, DATA_DIR, log.msg)
+		threads.deferToThread(update_check.run_scheduled_checks, SERVER_VERSION, DATA_DIR, log.msg)
 
 
 class Channel(object):
@@ -314,11 +317,15 @@ class Handler(LineReceiver):
 		if self.user.channel is not None:
 			channel = self.user.channel
 			msg_type = parsed['type']
-			# list_sessions works while already joined (the normal case, since every
-			# client auto-joins its own channel as a slave on connect) - handle it
-			# here rather than falling through to the generic relay below.
+			# list_sessions and get_server_info work while already joined (the
+			# normal case, since every client auto-joins its own channel as a
+			# slave on connect) - handle them here rather than falling
+			# through to the generic relay below.
 			if msg_type == 'list_sessions':
 				self.do_list_sessions(parsed)
+				return
+			if msg_type == 'get_server_info':
+				self.do_get_server_info(parsed)
 				return
 			is_master = self.user.connection_type == 'master'
 			if is_master and msg_type == 'key' and self.handle_control_gesture(channel, parsed):
@@ -407,6 +414,18 @@ class Handler(LineReceiver):
 	def do_pong(self, obj):
 		pass
 
+	def do_get_server_info(self, obj):
+		# v1.1.0: request/response, not an unconditional push at
+		# connectionMade - a client too old to know the 'server_info' type
+		# would hit RemoteMessageType(obj["type"]) raising ValueError in its
+		# own transport.py's parse(), logged as log.error, which NVDA turns
+		# into an audible error.wav on every single connect/reconnect (see
+		# client/CLAUDE.md's error.wav feedback-loop lesson - same root
+		# cause, different trigger). Only a client that already knows the
+		# type would ever send this request, so no old client is affected;
+		# see get_server_info's docstring in protocol.py.
+		self.user.send_server_info()
+
 	def do_list_sessions(self, obj):
 		"""Non-admin session discovery: any client already joined to its own
 		authorized channel may ask which *other* authorized sessions are online
@@ -452,6 +471,41 @@ class Handler(LineReceiver):
 		else:
 			self.send(type='auth_admin_response', success=False)
 			log.msg(f"Failed admin auth attempt: Connection {self.connection_id}")
+
+	def do_admin_check_for_updates(self, obj):
+		"""Admin-only, v1.1.0: lets an admin trigger update_check's GitHub
+		checks (both halves - server self-check and client-release
+		auto-detect/apply) right now from the admin GUI, instead of only
+		via the CLI (check_server_update.py) or waiting for the daily
+		scheduled check. Deliberately bypasses is_check_due() - an
+		explicit "check now" click must never be silently skipped because
+		the timer isn't due yet, same reasoning as the CLI script.
+
+		Blocking HTTP calls happen in update_check.run_scheduled_checks,
+		so this is routed through threads.deferToThread like the
+		scheduled check - a slow/hung GitHub request must not stall
+		relaying for every connected client just because one admin asked
+		for a check.
+		"""
+		log.msg(f"Admin-triggered update check requested: Connection {self.connection_id}")
+		d = threads.deferToThread(update_check.run_scheduled_checks, SERVER_VERSION, DATA_DIR, log.msg)
+		d.addCallback(self._send_update_check_response)
+		d.addErrback(lambda failure: self._send_update_check_response(
+			{'server': {'error': str(failure.value)}, 'client': {'error': str(failure.value)}}
+		))
+
+	def _send_update_check_response(self, results):
+		try:
+			self.send(
+				type='admin_update_check_response',
+				server=results.get('server'),
+				client=results.get('client'),
+			)
+		except Exception:
+			# The admin's connection may have dropped while the check (a
+			# real network round-trip) was still running - nothing to do,
+			# there's no one left to tell.
+			pass
 
 	def do_admin_list_channels(self, obj):
 		channels_info = []
@@ -614,6 +668,26 @@ class User(object):
 		version, url = self.server_state.get_addon_release()
 		if version and url:
 			self.send(type='addon_update', version=version, url=url)
+
+	def send_server_info(self):
+		# Sent in response to a client's get_server_info request only (v1.1.0)
+		# - deliberately NOT unconditional at connectionMade like send_motd/
+		# send_addon_update: an old client that doesn't know the 'server_info'
+		# type would log.error on receiving it (RemoteMessageType(...) raises
+		# ValueError), which NVDA turns into an audible error.wav on every
+		# connect/reconnect. Request/response means only a client that
+		# already knows the type (because it's new enough to send the
+		# request) ever receives a reply - version is not sensitive, so any
+		# connected user (not just admins) may ask, no gating needed.
+		# Includes the last known self-update-check result (None if the
+		# server hasn't completed one yet) so a client can also show
+		# whether a newer server release exists, without a separate
+		# admin-gated round trip.
+		self.send(
+			type='server_info',
+			version=SERVER_VERSION,
+			update_check=update_check.read_last_check(DATA_DIR),
+		)
 
 class RemoteServerFactory(Factory):
 	def __init__(self, server_state):

@@ -46,6 +46,11 @@ class RemoteMessageType(Enum):
     admin_approve_channel = "admin_approve_channel"
     admin_remove_channel = "admin_remove_channel"
     admin_response = "admin_response"
+    # Admin-triggered immediate GitHub update check (v1.1.0/3.2.3) - see
+    # server.py's do_admin_check_for_updates. Bypasses the daily due-gate,
+    # unlike the server's own scheduled check.
+    admin_check_for_updates = "admin_check_for_updates"    # request: no payload
+    admin_update_check_response = "admin_update_check_response"  # response: {server: {...}, client: {...}}
 
     # Session discovery & control handoff (non-admin) - see server.py's
     # do_list_sessions/handle_control_gesture/Channel.toggle_controller.
@@ -59,6 +64,18 @@ class RemoteMessageType(Enum):
     # before join/authorization), so even a quarantined/outdated client can
     # be told to update itself.
     addon_update = "addon_update"          # {version: "3.2", url: "https://.../remote-3.2.nvda-addon"}
+
+    # Server version info (v1.1.0/3.2.3) - see server.py's send_server_info/
+    # do_get_server_info. Request/response, NOT sent unconditionally like
+    # motd/addon_update above: an old client that doesn't recognize
+    # 'server_info' would log.error on it (RemoteMessageType(...) raises
+    # ValueError in transport.py's parse()), which NVDA turns into an
+    # audible error.wav on every connect/reconnect. Sent by transport.py's
+    # onConnected right alongside protocol_version/join, so only ever
+    # received by a client new enough to have sent the request itself - not
+    # admin-gated, the server's own version is not sensitive information.
+    get_server_info = "get_server_info"    # request: no payload
+    server_info = "server_info"            # response: {version: "1.1.0", update_check: {...} | None}
 
 
 SERVER_PORT = 6837

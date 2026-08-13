@@ -149,6 +149,104 @@ class UpdateCheckTests(unittest.TestCase):
 		self.assertEqual(len(messages), 1)
 		self.assertIn("1.2.0", messages[0])
 
+	# --- check_for_client_update ---
+
+	def _write_addon_release(self, version, url):
+		with open(os.path.join(self.data_dir, update_check.ADDON_RELEASE_FILENAME), 'w') as f:
+			json.dump({'version': version, 'url': url}, f)
+
+	def _releases_payload(self, *, client_versions=(), server_versions=(), prerelease_client_versions=(), asset=True):
+		releases = []
+		for v in client_versions:
+			releases.append({
+				'tag_name': f'v{v}',
+				'prerelease': False,
+				'draft': False,
+				'assets': [{'name': f'remote-{v}.nvda-addon', 'browser_download_url': f'https://example.org/remote-{v}.nvda-addon'}] if asset else [],
+			})
+		for v in prerelease_client_versions:
+			releases.append({
+				'tag_name': f'v{v}',
+				'prerelease': True,
+				'draft': False,
+				'assets': [{'name': f'remote-{v}.nvda-addon', 'browser_download_url': f'https://example.org/remote-{v}.nvda-addon'}],
+			})
+		for v in server_versions:
+			releases.append({'tag_name': f'server-v{v}', 'prerelease': False, 'draft': False, 'assets': []})
+		return releases
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_client_update_writes_addon_release_when_newer(self, mock_urlopen):
+		self._write_addon_release("3.2.1", "https://example.org/remote-3.2.1.nvda-addon")
+		mock_urlopen.return_value = _fake_response(self._releases_payload(client_versions=["3.2.2"]))
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertTrue(result['updated'])
+		current = update_check.read_current_addon_release(self.data_dir)
+		self.assertEqual(current['version'], "3.2.2")
+		self.assertEqual(current['url'], "https://example.org/remote-3.2.2.nvda-addon")
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_client_update_does_not_write_when_not_newer(self, mock_urlopen):
+		self._write_addon_release("3.2.2", "https://example.org/remote-3.2.2.nvda-addon")
+		mock_urlopen.return_value = _fake_response(self._releases_payload(client_versions=["3.2.1", "3.2.2"]))
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertFalse(result['updated'])
+		current = update_check.read_current_addon_release(self.data_dir)
+		self.assertEqual(current['version'], "3.2.2")
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_client_update_writes_when_no_prior_addon_release_file(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response(self._releases_payload(client_versions=["3.2.2"]))
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertTrue(result['updated'])
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_client_update_ignores_prerelease_tags(self, mock_urlopen):
+		self._write_addon_release("3.2.1", "https://example.org/remote-3.2.1.nvda-addon")
+		# A newer-numbered but pre-release tag must never win over an
+		# older official one - matches gh release's own "Pre-release"
+		# flag semantics (e.g. this repo's real v3.2 tag).
+		mock_urlopen.return_value = _fake_response(self._releases_payload(prerelease_client_versions=["9.9.9"]))
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertFalse(result['updated'])
+		self.assertIsNone(result['latest_version'])
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_client_update_ignores_server_tags(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response(self._releases_payload(server_versions=["1.0.0"]))
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertIsNone(result['latest_version'])
+		self.assertFalse(result['updated'])
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_client_update_skips_release_with_no_addon_asset(self, mock_urlopen):
+		self._write_addon_release("3.2.1", "https://example.org/remote-3.2.1.nvda-addon")
+		mock_urlopen.return_value = _fake_response(self._releases_payload(client_versions=["3.2.2"], asset=False))
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertFalse(result['updated'])
+		current = update_check.read_current_addon_release(self.data_dir)
+		self.assertEqual(current['version'], "3.2.1")
+
+	@mock.patch('update_check.urllib.request.urlopen', side_effect=OSError("network unreachable"))
+	def test_client_update_network_failure_does_not_raise(self, mock_urlopen):
+		result = update_check.check_for_client_update(self.data_dir)
+		self.assertIsNotNone(result['error'])
+		self.assertFalse(result['updated'])
+
+	# --- run_scheduled_checks ---
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_run_scheduled_checks_runs_both_server_and_client_checks(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response(self._releases_payload(
+			client_versions=["3.2.2"], server_versions=["1.0.0"],
+		))
+		combined = update_check.run_scheduled_checks("1.0.0", self.data_dir)
+		self.assertEqual(combined['server']['current_version'], "1.0.0")
+		self.assertEqual(combined['client']['latest_version'], "3.2.2")
+		self.assertIsNotNone(update_check.read_last_check(self.data_dir))  # server check persisted
+		current = update_check.read_current_addon_release(self.data_dir)
+		self.assertEqual(current['version'], "3.2.2")  # client check applied
+
 
 if __name__ == '__main__':
 	unittest.main()

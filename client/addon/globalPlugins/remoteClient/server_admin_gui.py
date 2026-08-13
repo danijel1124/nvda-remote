@@ -19,6 +19,7 @@ class ServerAdminDialog(wx.Dialog):
 		
 		self._init_ui()
 		self._refresh_token_list()
+		self._update_server_version_label()
 		self.Center()
 		
 	def _init_ui(self):
@@ -58,12 +59,25 @@ class ServerAdminDialog(wx.Dialog):
 		
 		hbox_curr = wx.BoxSizer(wx.HORIZONTAL)
 		hbox_curr.Add(wx.StaticText(self.tokens_tab, label=_("Server: %s") % self.current_server), flag=wx.CENTER|wx.RIGHT, border=10)
-		
+
 		self.login_btn = wx.Button(self.tokens_tab, label=_("Login to Current Server"))
 		self.login_btn.Bind(wx.EVT_BUTTON, self.on_login)
 		hbox_curr.Add(self.login_btn)
-		
+
 		curr_sizer.Add(hbox_curr, flag=wx.ALL|wx.EXPAND, border=10)
+
+		# Server's own version (self-reported unconditionally via
+		# server_info, not admin-gated - see session.py's handleServerInfo)
+		# and an admin-only on-demand re-check against GitHub (v1.1.0/3.2.3).
+		hbox_version = wx.BoxSizer(wx.HORIZONTAL)
+		self.server_version_label = wx.StaticText(self.tokens_tab, label=_("Server version: unknown"))
+		hbox_version.Add(self.server_version_label, flag=wx.CENTER|wx.RIGHT, border=10)
+
+		self.check_updates_btn = wx.Button(self.tokens_tab, label=_("Check for updates now"))
+		self.check_updates_btn.Bind(wx.EVT_BUTTON, self.on_check_updates)
+		hbox_version.Add(self.check_updates_btn)
+
+		curr_sizer.Add(hbox_version, flag=wx.LEFT|wx.RIGHT|wx.BOTTOM|wx.EXPAND, border=10)
 		vbox.Add(curr_sizer, flag=wx.EXPAND|wx.ALL, border=10)
 		
 		# Token List Management
@@ -228,3 +242,65 @@ class ServerAdminDialog(wx.Dialog):
 
 	def show_status(self, msg):
 		wx.CallAfter(lambda: wx.MessageBox(msg, _("Server Status"), wx.OK, self))
+
+	def _update_server_version_label(self):
+		"""Sourced from the already-connected session's server_info -
+		requested once at connect time via get_server_info (not admin-
+		gated), see session.py's handleServerInfo/transport.py's
+		onConnected. No extra round trip needed just to show this at
+		dialog-open time. NOTE: after an admin_check_for_updates response,
+		use show_update_check_results' own fresher data instead of calling
+		this - the session's cached serverUpdateCheck is not updated by
+		that response, so re-reading it here would show stale info."""
+		session = self.client.slaveSession or self.client.masterSession
+		if session is None or session.serverVersion is None:
+			text = _("Server version: unknown")
+		else:
+			text = _("Server version: %s") % session.serverVersion
+			update_check = session.serverUpdateCheck
+			if update_check and update_check.get('update_available') and update_check.get('latest_version'):
+				text += " " + _("(update available: %s)") % update_check['latest_version']
+		self.server_version_label.SetLabel(text)
+
+	def on_check_updates(self, event):
+		# Disabled until the response arrives (show_update_check_results
+		# re-enables it) - each click is two real, unauthenticated GitHub
+		# API calls (server + client checks), and this dialog has no
+		# other guard against firing a pile of them from repeated clicks
+		# while the first is still in flight.
+		self.check_updates_btn.Enable(False)
+		self.client.send_admin_check_for_updates()
+
+	def show_update_check_results(self, server, client):
+		"""Response to the admin_check_for_updates request (on_check_updates)
+		- server/client are update_check.py's result dicts, forwarded
+		as-is (see client.py's handle_update_check_response). Builds the
+		version label directly from this fresh 'server' result rather than
+		calling _update_server_version_label() - the session's cached
+		serverUpdateCheck isn't touched by this response, so re-reading it
+		would show stale (pre-check) info right after the very check that's
+		supposed to refresh it."""
+		self.check_updates_btn.Enable(True)
+		if server and not server.get('error'):
+			text = _("Server version: %s") % server.get('current_version', '?')
+			if server.get('update_available') and server.get('latest_version'):
+				text += " " + _("(update available: %s)") % server['latest_version']
+			self.server_version_label.SetLabel(text)
+		parts = []
+		if server:
+			if server.get('error'):
+				parts.append(_("Server check failed: %s") % server['error'])
+			elif server.get('update_available'):
+				parts.append(_("Server update available: %s") % server.get('latest_version'))
+			else:
+				parts.append(_("Server is up to date (%s)") % server.get('current_version'))
+		if client:
+			if client.get('error'):
+				parts.append(_("Client check failed: %s") % client['error'])
+			elif client.get('updated'):
+				parts.append(_("Client add-on updated to %s - will now be pushed to connecting clients") % client.get('latest_version'))
+			elif client.get('latest_version'):
+				parts.append(_("Client add-on is up to date (%s)") % client.get('latest_version'))
+			else:
+				parts.append(_("No official client release found"))
+		self.show_status("\n".join(parts))
