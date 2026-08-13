@@ -42,6 +42,10 @@ addon_info = {
 import os
 if os.environ.get('CI') and os.environ.get('GITHUB_REF_TYPE') == 'tag':
 	addon_info['addon_version'] = os.environ['GITHUB_REF_NAME'].lstrip('v')
+elif os.environ.get('NIGHTLY_VERSION'):
+	# Set by make_nightly.sh - never touches the committed addon_version
+	# above, which stays whatever the last real numbered release was.
+	addon_info['addon_version'] = os.environ['NIGHTLY_VERSION']
 
 import os.path
 
