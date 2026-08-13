@@ -47,6 +47,13 @@ class RemoteMessageType(Enum):
     admin_remove_channel = "admin_remove_channel"
     admin_response = "admin_response"
 
+    # Session discovery & control handoff (non-admin) - see server.py's
+    # do_list_sessions/handle_control_gesture/Channel.toggle_controller.
+    list_sessions = "list_sessions"        # request: who else is online & controllable
+    session_list = "session_list"          # response: [{key, client_count, has_controller}]
+    control_changed = "control_changed"    # broadcast to masters: {controller: <user_id or None>}
+    control_denied = "control_denied"      # a non-controller master's input was not relayed
+
 
 SERVER_PORT = 6837
 URL_PREFIX = 'nvdaremote://'

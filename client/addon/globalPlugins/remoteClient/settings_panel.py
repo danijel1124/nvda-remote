@@ -7,7 +7,6 @@ class RemoteSettingsPanel(SettingsPanel):
 	# Translators: This is the label for the remote settings category in NVDA Settings screen.
 	title = _("Remote")
 	autoconnect: wx.CheckBox
-	connection_type: wx.RadioBox
 	host: wx.TextCtrl
 	key: wx.TextCtrl
 	play_sounds: wx.CheckBox
@@ -19,13 +18,10 @@ class RemoteSettingsPanel(SettingsPanel):
 		self.autoconnect = wx.CheckBox(self, wx.ID_ANY, label=_("Auto-connect to control server on startup"))
 		self.autoconnect.Bind(wx.EVT_CHECKBOX, self.on_autoconnect)
 		sHelper.addItem(self.autoconnect)
-		
-		choices = [_("Allow this machine to be controlled"), _("Control another machine")]
-		self.connection_type = wx.RadioBox(self, wx.ID_ANY, choices=choices, style=wx.RA_VERTICAL)
-		self.connection_type.SetSelection(0)
-		self.connection_type.Enable(False)
-		sHelper.addItem(self.connection_type)
-		
+
+		# No connection-type choice here anymore: auto-connect is always as a
+		# controllable machine (slave). Controlling another machine is a
+		# separate, later action (Remote menu -> Control another computer).
 		sHelper.addItem(wx.StaticText(self, wx.ID_ANY, label=_("&Host:")))
 		self.host = wx.TextCtrl(self, wx.ID_ANY)
 		self.host.Enable(False)
@@ -52,16 +48,13 @@ class RemoteSettingsPanel(SettingsPanel):
 
 	def set_controls(self) -> None:
 		state = bool(self.autoconnect.GetValue())
-		self.connection_type.Enable(state)
 		# The session name (key) is now always the hostname and should not be editable
 		self.key.Enable(False)
 		self.host.Enable(state)
 
 	def set_from_config(self) -> None:
 		cs = self.config['controlserver']
-		connection_type = cs['connection_type']
 		self.autoconnect.SetValue(cs['autoconnect'])
-		self.connection_type.SetSelection(connection_type)
 		self.host.SetValue(cs['host'])
 		self.key.SetValue(cs['key'])
 		self.set_controls()
@@ -83,9 +76,9 @@ class RemoteSettingsPanel(SettingsPanel):
 	def write_to_config(self) -> None:
 		cs = self.config['controlserver']
 		cs['autoconnect'] = self.autoconnect.GetValue()
-		connection_type = self.connection_type.GetSelection()
 		cs['self_hosted'] = False
-		cs['connection_type'] = connection_type
+		# connection_type is deliberately left alone: it's no longer read by
+		# performAutoconnect (always slave now) or set by this panel.
 		cs['host'] = self.host.GetValue()
 		cs['key'] = self.key.GetValue()
 		self.config['ui']['play_sounds'] = self.play_sounds.GetValue()
