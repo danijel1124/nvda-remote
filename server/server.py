@@ -20,13 +20,40 @@ log.startLogging(sys.stdout)
 
 PING_INTERVAL = 300
 INITIAL_TIMEOUT = 30
-GENERATED_KEY_EXPIRATION_TIME = 60*60*24 
+GENERATED_KEY_EXPIRATION_TIME = 60*60*24
 QUARANTINE_MSG_INTERVAL = 5.0
+CONTROL_FREE_MSG_INTERVAL = 30.0
+# A held-down key produces a down+up `key` message pair per keystroke; without
+# throttling, an observer typing while not in control would get one
+# control_denied per edge - effectively continuous. At most one every 3s.
+CONTROL_DENIED_THROTTLE = 3.0
+# Virtual-key codes (Windows). Plain F10 from a master who isn't the controller is
+# a take-over gesture; Alt+F10 from the controller releases control. Either way the
+# gesture itself is swallowed, never relayed as a real keystroke - see
+# Handler.lineReceived and Channel.toggle_controller. Plain F10 *from the controller*
+# is relayed normally, so it stays available as an ordinary remote keystroke.
+VK_F10 = 0x79
+VK_ALT_CODES = frozenset((0x12, 0xA4, 0xA5))  # VK_MENU, VK_LMENU, VK_RMENU
+
+# Master->slave messages exempt from the controller gate: automatic braille
+# handshake/housekeeping (sent e.g. whenever a master connects or its braille
+# display changes), not something the user does to "steer" the remote machine.
+# Deliberately NOT exempt: key, braille_input, set_clipboard_text, send_SAS -
+# every actual input/control message stays controller-only. Gating these too
+# would fire on connect for every observer (not just when they act), stealing
+# the control_denied throttle slot from the real "you're not in control" cue.
+GATE_EXEMPT_MASTER_TYPES = frozenset(('set_display_size', 'set_braille_info'))
 
 DATA_DIR = "data"
 AUTH_KEYS_FILE = os.path.join(DATA_DIR, "authorized_keys.json")
 SEEN_KEYS_FILE = os.path.join(DATA_DIR, "seen_keys.json")
 ADMIN_TOKEN_FILE = os.path.join(DATA_DIR, "admin.token")
+# {"version": "3.2", "url": "https://.../remote-3.2.nvda-addon"} - written by
+# the release process, read fresh on every connection (see
+# ServerState.get_addon_release) rather than cached at startup, so announcing
+# a new client release never requires restarting the server. Absent/empty is
+# the default "nothing to push" state.
+ADDON_RELEASE_FILE = os.path.join(DATA_DIR, "addon_release.json")
 
 class Channel(object):
 	def __init__(self, key, server_state=None):
@@ -34,6 +61,10 @@ class Channel(object):
 		self.key = key
 		self.server_state = server_state
 		self.quarantine_loop = None
+		# The single client (a 'master') currently allowed to send control/input
+		# messages. None means the channel is up for grabs - see toggle_controller.
+		self.controller = None
+		self.control_free_loop = None
 		log.msg(f"Channel created for key: {self.key}")
 		self.check_authorization()
 
@@ -48,6 +79,9 @@ class Channel(object):
 	def start_quarantine(self):
 		if self.quarantine_loop is None or not self.quarantine_loop.running:
 			self.quarantine_loop = LoopingCall(self.send_quarantine_msg)
+			clock = getattr(self.server_state, 'clock', None)
+			if clock is not None:
+				self.quarantine_loop.clock = clock
 			self.quarantine_loop.start(QUARANTINE_MSG_INTERVAL)
 
 	def stop_quarantine(self):
@@ -65,13 +99,26 @@ class Channel(object):
 			)
 
 	def add_client(self, client):
+		# The first master to join a channel with no controller takes control
+		# automatically. This keeps every pre-existing single-master connection
+		# (i.e. every client that predates take-over/observer support) working
+		# exactly as before, with no protocol changes required on its part.
+		if client.connection_type == 'master' and self.controller is None:
+			self.controller = client
+		# Deliberately NOT adding a `controller` field here: channel_joined is a
+		# message type every already-deployed client recognizes and has a fixed
+		# handler for (no **kwargs catch-all); an unexpected extra field risks
+		# breaking that handler on every client we can't update. control_changed
+		# is a message type old clients don't know at all, which fails cleanly
+		# at the type lookup and is safely ignored - so that's used instead,
+		# both here (for a joining observer) and via broadcast_control_changed.
 		if client.protocol.protocol_version == 1:
 			ids = [c.user_id for c in self.clients.values()]
 			msg = dict(type='channel_joined', channel=self.key, user_ids=ids, origin=client.user_id)
 		else:
 			clients = [i.as_dict() for i in self.clients.values()]
 			msg = dict(type='channel_joined', channel=self.key, origin=client.user_id, clients=clients)
-		
+
 		client.send(**msg)
 		for existing_client in self.clients.values():
 			if existing_client.protocol.protocol_version == 1:
@@ -79,10 +126,21 @@ class Channel(object):
 			else:
 				existing_client.send(type='client_joined', client=client.as_dict())
 		self.clients[client.user_id] = client
+		if self.controller is client:
+			self.broadcast_control_changed()
+		elif client.connection_type == 'master':
+			# A joining observer: tell them immediately who's in control instead
+			# of leaving them to find out from the 30s reminder or a denial.
+			controller_id = self.controller.user_id if self.controller else None
+			client.send(type='control_changed', controller=controller_id)
+		self.update_control_free_loop()
 
 	def remove_connection(self, con):
 		if con.user_id in self.clients:
 			del self.clients[con.user_id]
+		controller_left = self.controller is con
+		if controller_left:
+			self.controller = None
 		for client in self.clients.values():
 			if client.protocol.protocol_version == 1:
 				client.send(type='client_left', user_id=con.user_id)
@@ -90,18 +148,81 @@ class Channel(object):
 				client.send(type='client_left', client=con.as_dict())
 		if not self.clients:
 			self.stop_quarantine()
+			self.stop_control_free_loop()
 			self.server_state.remove_channel(self.key)
+			return
+		if controller_left:
+			self.broadcast_control_changed()
+		self.update_control_free_loop()
 
 	def ping_clients(self):
 		self.send_to_clients({'type': 'ping'})
 
-	def send_to_clients(self, obj, exclude=None, origin=None):
+	def send_to_clients(self, obj, exclude=None, origin=None, only_masters=False):
 		if not self.is_authorized:
 			return
 		for client in self.clients.values():
 			if client is exclude:
 				continue
+			if only_masters and client.connection_type != 'master':
+				continue
 			client.send(origin=origin, **obj)
+
+	# --- Control handoff (take-over/release, observer mode) ---
+
+	def toggle_controller(self, user):
+		"""Handle a non-relayed F10 `key` press from a master: take control if the
+		channel currently has none, release it if this user is the controller,
+		or deny it if someone else is already controlling."""
+		if self.controller is None:
+			self.controller = user
+		elif self.controller is user:
+			self.controller = None
+		else:
+			# An explicit, discrete take-over attempt while someone else already
+			# controls - unlike a stream of denied keystrokes, this fires once
+			# per physical F10 press, so it must not share the input-denial
+			# throttle: that's the exact feedback the user asked for by name.
+			user.send(type='control_denied')
+			return
+		self.broadcast_control_changed()
+		self.update_control_free_loop()
+
+	def broadcast_control_changed(self):
+		# Only masters act on this (observers waiting to take over, the new
+		# controller confirming their take-over); slaves have no handler for it
+		# and - crucially - neither do any already-deployed pre-take-over
+		# clients, who would otherwise log an unhandled-message error on every
+		# occurrence, including the 30s reminder, for machines we can't update.
+		controller_id = self.controller.user_id if self.controller else None
+		self.send_to_clients({'type': 'control_changed', 'controller': controller_id}, only_masters=True)
+
+	def has_listening_masters(self):
+		return any(
+			c.connection_type == 'master' and c is not self.controller
+			for c in self.clients.values()
+		)
+
+	def update_control_free_loop(self):
+		if self.controller is None and self.has_listening_masters():
+			self.start_control_free_loop()
+		else:
+			self.stop_control_free_loop()
+
+	def start_control_free_loop(self):
+		if self.control_free_loop is None or not self.control_free_loop.running:
+			self.control_free_loop = LoopingCall(self.broadcast_control_changed)
+			clock = getattr(self.server_state, 'clock', None)
+			if clock is not None:
+				self.control_free_loop.clock = clock
+			# now=False: the change that led here (controller becoming None) was
+			# already broadcast by the caller; don't send a duplicate immediately.
+			self.control_free_loop.start(CONTROL_FREE_MSG_INTERVAL, now=False)
+
+	def stop_control_free_loop(self):
+		if self.control_free_loop and self.control_free_loop.running:
+			self.control_free_loop.stop()
+		self.control_free_loop = None
 
 class Handler(LineReceiver):
 	delimiter = b'\n'
@@ -119,8 +240,9 @@ class Handler(LineReceiver):
 		self.bytes_sent = 0
 		self.bytes_received = 0
 		self.user = User(protocol=self)
-		self.cleanup_timer = reactor.callLater(INITIAL_TIMEOUT, self.cleanup)
+		self.cleanup_timer = self.user.server_state.clock.callLater(INITIAL_TIMEOUT, self.cleanup)
 		self.user.send_motd()
+		self.user.send_addon_update()
 
 	def connectionLost(self, reason):
 		log.msg("Connection %d lost, bytes sent: %d received: %d" % (self.connection_id, self.bytes_sent, self.bytes_received))
@@ -157,18 +279,125 @@ class Handler(LineReceiver):
 			return
 
 		if self.user.channel is not None:
-			self.user.channel.send_to_clients(parsed, exclude=self.user, origin=self.user.user_id)
+			channel = self.user.channel
+			msg_type = parsed['type']
+			# list_sessions works while already joined (the normal case, since every
+			# client auto-joins its own channel as a slave on connect) - handle it
+			# here rather than falling through to the generic relay below.
+			if msg_type == 'list_sessions':
+				self.do_list_sessions(parsed)
+				return
+			is_master = self.user.connection_type == 'master'
+			if is_master and msg_type == 'key' and self.handle_control_gesture(channel, parsed):
+				return
+			if (
+				is_master
+				and msg_type not in GATE_EXEMPT_MASTER_TYPES
+				and channel.controller is not self.user
+			):
+				self.user.send_control_denied()
+				return
+			channel.send_to_clients(parsed, exclude=self.user, origin=self.user.user_id)
 			return
 		elif not hasattr(self, "do_"+parsed['type']):
 			log.msg("No function for type %s" % parsed['type'])
 			return
 		getattr(self, "do_"+parsed['type'])(parsed)
 
+	def handle_control_gesture(self, channel, parsed):
+		"""Intercepts the F10 take-over / Alt+F10 release gesture out of a
+		master's `key` stream before it reaches the normal relay/gating below.
+
+		Plain F10 from a master who isn't the controller takes control (or is
+		denied if someone else already has it); Alt+F10 from the controller
+		releases it. Either way the gesture is swallowed - both the down and
+		the matching up edge - so it never reaches the controlled machine as a
+		real keystroke. Plain F10 from the controller (no Alt held) is left
+		alone and falls through to a normal relay, so it stays available as an
+		ordinary remote keystroke.
+
+		Returns True if this event was fully handled and must not be relayed
+		or gated normally, False if normal processing should continue.
+		"""
+		user = self.user
+		vk_code = parsed.get('vk_code')
+		pressed = parsed.get('pressed', True)
+
+		if vk_code in VK_ALT_CODES:
+			if pressed:
+				user.held_alt_msg = dict(parsed)
+			elif user.suppress_alt_up:
+				# The tail end of an Alt+F10 release: we already sent a
+				# synthetic Alt-up proactively, don't relay/deny this one too.
+				user.suppress_alt_up = False
+				return True
+			else:
+				user.held_alt_msg = None
+			return False
+
+		if vk_code != VK_F10:
+			return False
+
+		if not pressed:
+			if user.suppress_f10_up:
+				user.suppress_f10_up = False
+				return True
+			return False  # up-edge of a real F10 keystroke - relay normally
+
+		is_controller = channel.controller is user
+		if is_controller and not user.held_alt_msg:
+			return False  # plain F10 from the controller - a real keystroke
+
+		user.suppress_f10_up = True
+		if is_controller:
+			# Alt+F10: release control. Send a synthetic matching Alt key-up so
+			# the controlled machine never sees a stuck modifier key - its real
+			# Alt-down was already relayed before we knew F10 would follow.
+			synth_up = dict(user.held_alt_msg, pressed=False)
+			channel.send_to_clients(synth_up, exclude=user, origin=user.user_id)
+			user.held_alt_msg = None
+			user.suppress_alt_up = True
+		else:
+			# Taking over from observer status: any Alt we were tracking was
+			# held while our own key events were being denied, so the slave
+			# never actually saw an Alt-down - discard it rather than let it
+			# leak into our new controller role (which could otherwise send a
+			# bogus synthetic Alt-up, or misfire on our next Alt+F10 release,
+			# using a message that was never really relayed).
+			user.held_alt_msg = None
+		channel.toggle_controller(user)
+		return True
+
 	def do_ping(self, obj):
 		self.send(type='pong')
 
 	def do_pong(self, obj):
 		pass
+
+	def do_list_sessions(self, obj):
+		"""Non-admin session discovery: any client already joined to its own
+		authorized channel may ask which *other* authorized sessions are online
+		and controllable (i.e. currently have a slave connected), to populate
+		'Control another computer'. Unlike admin_list_channels this deliberately
+		does not require admin auth, and only shows online+authorized+controllable
+		sessions - no whitelist management info, no offline/unauthorized keys."""
+		own_channel = self.user.channel
+		if own_channel is None or not own_channel.is_authorized:
+			self.send(type='error', error='not_authorized')
+			return
+		state = self.user.server_state
+		sessions = []
+		for key, channel in state.channels.items():
+			if key == own_channel.key or not channel.is_authorized:
+				continue
+			if not any(c.connection_type == 'slave' for c in channel.clients.values()):
+				continue
+			sessions.append({
+				'key': key,
+				'client_count': len(channel.clients),
+				'has_controller': channel.controller is not None,
+			})
+		self.send(type='session_list', sessions=sessions)
 
 	def handle_admin_command(self, parsed):
 		if not self.user.is_admin:
@@ -263,9 +492,28 @@ class User(object):
 		self.user_id = User.user_id + 1
 		User.user_id += 1
 		self.is_admin = False
+		# Per-connection state for the F10/Alt+F10 control gesture (see
+		# Handler.handle_control_gesture) - key events carry one key each, no
+		# modifier field, so Alt has to be tracked across messages.
+		self.held_alt_msg = None  # the last Alt keydown `key` message, or None if up
+		self.suppress_f10_up = False
+		self.suppress_alt_up = False
+		self.last_control_denied_at = None
 
 	def as_dict(self):
 		return dict(id=self.user_id, connection_type=self.connection_type)
+
+	def send_control_denied(self):
+		"""Like send(type='control_denied'), but throttled: an observer holding
+		a key down or typing generates a down+up `key` message per keystroke,
+		every one of which is denied - without throttling this would be sent
+		continuously instead of as a one-off "you're not in control" cue."""
+		now = self.server_state.clock.seconds()
+		last = self.last_control_denied_at
+		if last is not None and (now - last) < CONTROL_DENIED_THROTTLE:
+			return
+		self.last_control_denied_at = now
+		self.send(type='control_denied')
 
 	def generate_key(self):
 		ip = self.protocol.transport.getPeer().host
@@ -302,6 +550,17 @@ class User(object):
 		if self.server_state.motd is not None:
 			self.send(type='motd', motd=self.server_state.motd)
 
+	def send_addon_update(self):
+		# Sent to every connection unconditionally, same as send_motd (before
+		# join/authorization) - a quarantined/unauthorized client is exactly
+		# the one that can't be reached any other way to tell it to update.
+		# One consequence: the addon_release.json url is reachable by any
+		# host that can open a TCP connection to the relay, not just
+		# authorized ones - treat its contents as effectively public.
+		version, url = self.server_state.get_addon_release()
+		if version and url:
+			self.send(type='addon_update', version=version, url=url)
+
 class RemoteServerFactory(Factory):
 	def __init__(self, server_state):
 		self.server_state = server_state
@@ -310,7 +569,7 @@ class RemoteServerFactory(Factory):
 			channel.ping_clients()
 
 class ServerState(object):
-	def __init__(self):
+	def __init__(self, clock=None):
 		self.channels = {}
 		self.generated_keys = set()
 		self.generated_ips = {}
@@ -318,6 +577,10 @@ class ServerState(object):
 		self.authorized_keys = set()
 		self.seen_keys = set()
 		self.admin_token = ""
+		# Injectable scheduler for LoopingCalls (quarantine/control-free reminders).
+		# Defaults to the real reactor; tests pass a twisted.internet.task.Clock
+		# so periodic messages can be advanced deterministically without waiting.
+		self.clock = clock if clock is not None else reactor
 		self.init_data_dir()
 		self.load_keys()
 		self.load_seen_keys()
@@ -382,6 +645,28 @@ class ServerState(object):
 			self.seen_keys.remove(key)
 			self.save_seen_keys()
 			log.msg(f"Key removed from seen list: {key}")
+
+	def get_addon_release(self):
+		"""Reads ADDON_RELEASE_FILE fresh on every call (see the comment on
+		that constant) and returns (version, url), or (None, None) if there's
+		nothing to push. Never raises - this runs from Handler.connectionMade,
+		before anything else about the connecting client is known, so a
+		missing/malformed/half-written file must degrade to "push nothing"
+		rather than break every new connection (same precedent as
+		load_seen_keys' bare except)."""
+		try:
+			if not os.path.exists(ADDON_RELEASE_FILE):
+				return None, None
+			with open(ADDON_RELEASE_FILE, 'r') as f:
+				data = json.load(f)
+			version = data.get('version')
+			url = data.get('url')
+			if not version or not url:
+				return None, None
+			return version, url
+		except Exception as e:
+			log.err(f"Failed to read addon release info: {e}")
+			return None, None
 
 	def load_or_generate_admin_token(self):
 		if os.path.exists(ADMIN_TOKEN_FILE):

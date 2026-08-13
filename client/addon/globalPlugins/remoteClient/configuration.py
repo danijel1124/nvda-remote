@@ -35,6 +35,17 @@ configspec = StringIO("""
 
 [ui]
 	play_sounds = boolean(default=True)
+
+[addon_update]
+	# The last version we've already downloaded+installed (or tried and
+	# failed to) via the server's addon_update push - see addon_update.py.
+	# This is the *primary* gate on whether to act on a new push, not just a
+	# dedup convenience: addonHandler.getCodeAddon().version keeps reporting
+	# the old version until NVDA is restarted to complete a pending install,
+	# so comparing only against the installed version would re-download and
+	# re-install the same update on every reconnect.
+	last_handled_version = string(default="")
+	last_handled_failed = boolean(default=False)
 """)
 def get_config():
 	global _config
@@ -46,6 +57,17 @@ def get_config():
 		# Always enforce hostname as the session name (key)
 		_config['controlserver']['key'] = socket.gethostname()
 	return _config
+
+def get_admin_token_for_address(address: str) -> str:
+	"""Look up a stored admin token for a given "host:port" address, falling
+	back to the legacy single-token slot if nothing server-specific is stored.
+	Shared by the admin login dialog and the automatic post-reconnect re-auth
+	in client.py, so both agree on where a token for a server lives."""
+	config = get_config()
+	token = config.get('admin_tokens', {}).get(address)
+	if not token:
+		token = config['controlserver'].get('admin_token', '')
+	return token
 
 def minify_config(parent_window):
 	"""Identifies and removes unused configuration keys after asking the user."""

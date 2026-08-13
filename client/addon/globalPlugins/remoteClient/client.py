@@ -83,6 +83,14 @@ class RemoteClient:
 		url_handler.register_url_handler()
 		self.masterTransport = None
 		self.slaveTransport = None
+		self._admin_transport = None
+		# Whether the pinned admin transport is currently admin-authenticated,
+		# so a silent reconnect (RelayTransport/ConnectorThread retries on drop
+		# without tearing down the session) can be followed by an automatic
+		# re-auth instead of a silent access_denied on the next admin action.
+		self._admin_authenticated = False
+		self._auto_reauth_pending = False
+		self._awaitingSessionList = False
 		self.hookThread = None
 		self.sendingKeys = False
 		try:
@@ -131,12 +139,14 @@ class RemoteClient:
 		# self_hosted check removed or ignored
 		address = addressToHostPort(controlServerConfig["host"])
 		hostname, port = address
-		mode = (
-			ConnectionMode.SLAVE
-			if controlServerConfig["connection_type"] == 0
-			else ConnectionMode.MASTER
-		)
-		conInfo = ConnectionInfo(mode=mode, hostname=hostname, port=port, key=key)
+		# Always slave: controlling another machine is now a separate, later,
+		# explicit action (Remote menu -> Control another computer), never
+		# something to auto-restore on startup. controlServerConfig
+		# ["connection_type"] is leftover from before this redesign (still in
+		# the configspec, so minify_config won't drop it, and an old remote.ini
+		# could have it at 1) - deliberately ignored here rather than migrated,
+		# since nothing reads it anywhere else.
+		conInfo = ConnectionInfo(mode=ConnectionMode.SLAVE, hostname=hostname, port=port, key=key)
 		self.connect(conInfo)
 
 	def terminate(self):
@@ -167,7 +177,11 @@ class RemoteClient:
 		ui.message(status)
 
 	def pushClipboard(self):
-		connector = self.slaveTransport or self.masterTransport
+		# Prefer the machine being controlled (master) over our own control-server
+		# connection (slave) - matches copyLink's precedence below. With both
+		# connected at once (control-another-computer), "push clipboard" without
+		# further qualification should mean "to the machine I'm working on".
+		connector = self.masterTransport or self.slaveTransport
 		if not getattr(connector, "connected", False):
 			ui.message(_("Not connected."))
 			return
@@ -184,6 +198,13 @@ class RemoteClient:
 		api.copyToClip(str(url))
 
 	def sendSAS(self):
+		# Only meaningful while controlling another machine (master). Being
+		# slave-only is now the default state, so this must not assume
+		# masterTransport exists - it would otherwise be a reachable
+		# AttributeError for every user who hasn't also connected as master.
+		if not getattr(self.masterTransport, "connected", False):
+			ui.message(_("Not controlling a remote computer."))
+			return
 		self.masterTransport.send(RemoteMessageType.send_SAS)
 
 	def connect(self, connectionInfo: ConnectionInfo):
@@ -207,11 +228,17 @@ class RemoteClient:
 		cues.disconnected()
 
 	def disconnectAsMaster(self):
+		if self._admin_transport is self.masterSession.transport:
+			self._admin_transport = None
+			self._admin_authenticated = False
 		self.masterSession.close()
 		self.masterSession = None
 		self.masterTransport = None
 
 	def disconnectAsSlave(self):
+		if self._admin_transport is self.slaveSession.transport:
+			self._admin_transport = None
+			self._admin_authenticated = False
 		self.slaveSession.close()
 		self.slaveSession = None
 		self.slaveTransport = None
@@ -250,6 +277,90 @@ class RemoteClient:
 			self.connect(connectionInfo=connectionInfo)
 		gui.runScriptModalDialog(dlg, callback=handleDialogCompletion)
 
+	def showControlAnotherComputer(self, evt=None):
+		if evt is not None:
+			evt.Skip()
+		if not self.isConnectedAsSlave():
+			gui.messageBox(
+				_("Connect to a control server first."), _("Error"), wx.OK | wx.ICON_ERROR
+			)
+			return
+		if self.isConnectedAsMaster():
+			gui.messageBox(
+				_("Already controlling a remote computer. Disconnect from it first."),
+				_("Error"),
+				wx.OK | wx.ICON_ERROR,
+			)
+			return
+		self._awaitingSessionList = True
+		# Must go out on the control-server (slave) connection specifically -
+		# see the comment on this registration in connectAsSlave.
+		self.slaveTransport.send(RemoteMessageType.list_sessions)
+
+	@alwaysCallAfter
+	def handle_session_list(self, sessions=None):
+		# Inbound messages are dispatched from RelayTransport's reader thread
+		# (see onConnectedAsSlave/onDisconnectedAsSlave above for the same
+		# pattern) - runScriptModalDialog must run on the wx main thread.
+		if not getattr(self, "_awaitingSessionList", False):
+			return
+		self._awaitingSessionList = False
+		dlg = dialogs.ControlAnotherComputerDialog(gui.mainFrame, sessions or [])
+
+		def handleDialogCompletion(dlgResult):
+			if dlgResult != wx.ID_OK:
+				return
+			key = dlg.getSelectedKey()
+			if key:
+				self.connectToTarget(key)
+		gui.runScriptModalDialog(dlg, callback=handleDialogCompletion)
+
+	@alwaysCallAfter
+	def handle_error(self, error=None, message=None):
+		# The only case this currently needs to cover: do_list_sessions replies
+		# with type=error/error=not_authorized instead of session_list when our
+		# own channel is quarantined. Without this, _awaitingSessionList would
+		# stay True forever and the menu click would silently do nothing.
+		# Other error values (e.g. admin_* failures, which arrive on this same
+		# transport since _get_active_transport prefers slave too) must be
+		# left alone here - swallowing them would both show a wrong message
+		# and clear the flag, dropping the real session_list that follows.
+		if not getattr(self, "_awaitingSessionList", False):
+			return
+		if error != "not_authorized":
+			return
+		self._awaitingSessionList = False
+		gui.messageBox(
+			_("Could not list other computers: this computer is not yet authorized on the control server."),
+			_("Error"),
+			wx.OK | wx.ICON_ERROR,
+		)
+
+	def connectToTarget(self, key: str):
+		if self.isConnectedAsMaster() or not self.isConnectedAsSlave():
+			return
+		slaveInfo = self.slaveSession.getConnectionInfo()
+		connectionInfo = ConnectionInfo(
+			hostname=slaveInfo.hostname,
+			port=slaveInfo.port,
+			mode=ConnectionMode.MASTER,
+			key=key,
+			# getConnectionInfo() above doesn't carry this (it never sets
+			# insecure on the ConnectionInfo it builds), so read the live flag
+			# off the transport itself - it starts at whatever was passed in
+			# and flips True mid-connect on a trusted-fingerprint auto-retry
+			# (transport.py's run(), ~line 334). Without this, a self-signed
+			# control server that the slave connection already accepted would
+			# make this master connect fail strict verification and land in
+			# onMasterCertificateFailed -> handleCertificateFailure, whose
+			# disconnect() tears down *both* sessions - dropping the control-
+			# server connection the user still needs.
+			insecure=self.slaveTransport.insecure,
+		)
+		# Chosen explicitly from a list the user just asked to see - no need
+		# for verifyAndConnect's "are you sure?" confirmation on top of that.
+		self.connectAsMaster(connectionInfo)
+
 	def connectAsMaster(self, connectionInfo: ConnectionInfo):
 		transport = RelayTransport.create(
 			connection_info=connectionInfo, serializer=serializer.JSONSerializer()
@@ -264,6 +375,12 @@ class RemoteClient:
 		transport.transportConnectionFailed.register(self.onConnectAsMasterFailed)
 		transport.transportClosing.register(self.onDisconnectingAsMaster)
 		transport.transportDisconnected.register(self.onDisconnectedAsMaster)
+		# Once per transport object, not per (re)connect - onConnectedAsMaster
+		# below refires on every silent ConnectorThread reconnect, and
+		# re-registering the same bound methods on every one of those would
+		# either stack up duplicate handlers or rely on unclear dedupe
+		# semantics in NVDA's extension points.
+		self.register_admin_handlers(transport)
 		transport.reconnectorThread.start()
 		self.masterTransport = transport
 		self.menu.handleConnecting(connectionInfo.mode)
@@ -272,9 +389,8 @@ class RemoteClient:
 		log.info("Successfully connected as master")
 		configuration.write_connection_to_config(self.masterSession.getConnectionInfo())
 		self.menu.handleConnected(ConnectionMode.MASTER, True)
-		# Register Admin Handlers
-		self.register_admin_handlers(self.masterSession.transport)
-		
+		self._maybe_reauth_admin(self.masterSession.transport)
+
 		# We might have already created a hook thread before if we're restoring an
 		# interrupted connection. We must not create another.
 		if not self.hookThread:
@@ -321,6 +437,19 @@ class RemoteClient:
 		)
 		transport.transportConnected.register(self.onConnectedAsSlave)
 		transport.transportDisconnected.register(self.onDisconnectedAsSlave)
+		# Once per transport object - see the matching comment in connectAsMaster.
+		self.register_admin_handlers(transport)
+		# list_sessions/session_list only make sense on the slave (control-
+		# server) connection: the server scopes the answer to *this*
+		# connection's own channel, and a request sent over a master
+		# connection instead would get scoped to the target's channel -
+		# excluding the target itself and including our own machine. See
+		# showControlAnotherComputer, which enforces sending through this
+		# transport specifically rather than "whichever is active".
+		transport.registerInbound(RemoteMessageType.session_list, self.handle_session_list)
+		# Covers list_sessions' failure reply (own channel not authorized yet) -
+		# see handle_error.
+		transport.registerInbound(RemoteMessageType.error, self.handle_error)
 		transport.reconnectorThread.start()
 		self.menu.handleConnecting(connectionInfo.mode)
 
@@ -329,8 +458,7 @@ class RemoteClient:
 	def onConnectedAsSlave(self):
 		log.info("Control connector connected")
 		cues.control_server_connected()
-		# Register Admin Handlers
-		self.register_admin_handlers(self.slaveSession.transport)
+		self._maybe_reauth_admin(self.slaveSession.transport)
 
 		# Translators: Presented in direct (client to server) remote connection when the controlled computer is ready.
 		speech.speakMessage(_("Connected to control server"))
@@ -437,8 +565,17 @@ class RemoteClient:
 		self.setReceivingBraille(self.sendingKeys)
 		if self.sendingKeys:
 			self.hostPendingModifiers = gesture.modifiers
-			# Translators: Presented when sending keyboard keys from the controlling computer to the controlled computer.
-			ui.message(_("Controlling remote machine."))
+			# Whether this actually controls anything is decided server-side
+			# (self.masterSession.isController). Announcing "Controlling remote
+			# machine" regardless would be misleading for an observer: their
+			# keys get silently dropped until a throttled control_denied cue
+			# eventually arrives, up to a few seconds later.
+			if self.masterSession and self.masterSession.isController:
+				# Translators: Presented when sending keyboard keys from the controlling computer to the controlled computer.
+				ui.message(_("Controlling remote machine."))
+			else:
+				# Translators: Presented when F11 is toggled on while not actually in control of the remote machine.
+				ui.message(_("Sending keys, but not in control. Press F10 to take control."))
 		else:
 			self.releaseKeys()
 			# Translators: Presented when keyboard control is back to the controlling computer.
@@ -462,11 +599,32 @@ class RemoteClient:
 
 	@alwaysCallAfter
 	def verifyAndConnect(self, conInfo: ConnectionInfo):
-		if self.isConnected() or self.connecting:
+		# Master and slave are independent connections that can coexist
+		# (control-server baseline + optionally controlling another machine),
+		# so this must only block a *second* connection of the *same* role,
+		# not any connection at all - otherwise "control another computer"
+		# could never work while already connected as slave.
+		if self.connecting:
 			gui.messageBox(
 				_(
-					"NVDA Remote is already connected. Disconnect before opening a new connection."
+					"NVDA Remote is already connecting. Please wait."
 				),
+				_("NVDA Remote Already Connected"),
+				wx.OK | wx.ICON_WARNING,
+			)
+			return
+		alreadyConnectedInThisRole = (
+			self.isConnectedAsMaster() if conInfo.mode == ConnectionMode.MASTER
+			else self.isConnectedAsSlave()
+		)
+		if alreadyConnectedInThisRole:
+			message = (
+				_("Already controlling a remote computer. Disconnect from it before opening a new connection.")
+				if conInfo.mode == ConnectionMode.MASTER
+				else _("Already connected to a control server. Disconnect before opening a new connection.")
+			)
+			gui.messageBox(
+				message,
 				_("NVDA Remote Already Connected"),
 				wx.OK | wx.ICON_WARNING,
 			)
@@ -495,11 +653,19 @@ class RemoteClient:
 		self.connect(conInfo)
 		self.connecting = False
 
+	def isConnectedAsSlave(self):
+		return bool(self.slaveTransport and self.slaveTransport.connected)
+
+	def isConnectedAsMaster(self):
+		return bool(self.masterTransport and self.masterTransport.connected)
+
 	def isConnected(self):
-		connector = self.slaveTransport or self.masterTransport
-		if connector is not None:
-			return connector.connected
-		return False
+		# "Any connection at all" - correct for checks that genuinely don't
+		# care which role (e.g. "is the admin GUI usable at all"). For
+		# anything that means "already connected as X specifically", use
+		# isConnectedAsSlave()/isConnectedAsMaster() instead - master and
+		# slave are independent connections that can coexist.
+		return self.isConnectedAsSlave() or self.isConnectedAsMaster()
 
 	def registerLocalScript(self, script):
 		self.localScripts.add(script)
@@ -520,11 +686,31 @@ class RemoteClient:
 		dlg.ShowModal() 
 
 	def _get_active_transport(self):
-		if self.masterSession: return self.masterSession.transport
-		if self.slaveSession: return self.slaveSession.transport
-		return None
+		# Pin to whichever transport admin traffic is already going out on, so
+		# connecting/disconnecting as master (control-another-computer) never
+		# swaps the admin channel out from under an already-authenticated
+		# session mid-dialog. Admin auth is per-TCP-connection server-side, so
+		# silently switching transports means every subsequent admin_* call
+		# would come back access_denied with no obvious cause.
+		if self._admin_transport is not None and getattr(self._admin_transport, "connected", False):
+			return self._admin_transport
+		# Prefer the control-server (slave) connection: it's the stable "home"
+		# connection, whereas a master connection to some other machine is
+		# transient and may end at any time.
+		transport = None
+		if self.slaveSession:
+			transport = self.slaveSession.transport
+		elif self.masterSession:
+			transport = self.masterSession.transport
+		self._admin_transport = transport
+		return transport
 
 	def send_admin_auth(self, token):
+		# A user-initiated login always wants its own result shown, even if an
+		# automatic reauth's response never arrived (send failed, connection
+		# dropped again, ...) and left the flag set - otherwise this deliberate
+		# attempt would be silently swallowed with no Login Successful/Failed.
+		self._auto_reauth_pending = False
 		t = self._get_active_transport()
 		if t: t.send(RemoteMessageType.auth_admin, token=token)
 
@@ -540,12 +726,41 @@ class RemoteClient:
 		t = self._get_active_transport()
 		if t: t.send(RemoteMessageType.admin_remove_channel, key=key)
 
+	def _maybe_reauth_admin(self, transport):
+		"""Called whenever a transport (re)connects. RelayTransport reconnects
+		silently on a dropped connection (ConnectorThread) without tearing the
+		session down - but the server sees a brand-new TCP connection, with
+		admin auth reset. If this is the pinned admin transport and we were
+		previously admin-authenticated on it, transparently re-auth using the
+		same stored token rather than leaving every subsequent admin_* call to
+		silently come back access_denied after the next network hiccup."""
+		if transport is not self._admin_transport or not self._admin_authenticated:
+			return
+		address = f"{transport.address[0]}:{transport.address[1]}"
+		token = configuration.get_admin_token_for_address(address)
+		if token:
+			# Tell handle_auth_response this auth_admin was triggered by us
+			# reconnecting, not by the user clicking Login, so it doesn't pop an
+			# unsolicited "Login Successful" box if the admin dialog happens to
+			# be open at that moment.
+			self._auto_reauth_pending = True
+			transport.send(RemoteMessageType.auth_admin, token=token)
+
 	def register_admin_handlers(self, transport):
 		transport.registerInbound(RemoteMessageType.auth_admin_response, self.handle_auth_response)
 		transport.registerInbound(RemoteMessageType.admin_channel_list, self.handle_channel_list)
 		transport.registerInbound(RemoteMessageType.admin_response, self.handle_admin_response)
 
 	def handle_auth_response(self, success=False):
+		self._admin_authenticated = success
+		wasAutoReauth = self._auto_reauth_pending
+		self._auto_reauth_pending = False
+		if wasAutoReauth:
+			# Silent: keep the session usable and, if the dialog happens to be
+			# open, its list fresh - but no modal the user didn't ask for.
+			if success and self.admin_ui:
+				self.send_admin_list_req()
+			return
 		if self.admin_ui:
 			msg = _("Login Successful") if success else _("Login Failed")
 			self.admin_ui.show_status(msg)

@@ -156,13 +156,8 @@ class ServerAdminDialog(wx.Dialog):
 			self._refresh_token_list()
 
 	def on_login(self, event):
-		# Try to get token for current server
-		token = self.config.get('admin_tokens', {}).get(self.current_server)
-		if not token:
-			# Fallback to legacy single token if available and it matches the connection? 
-			# Or just ask for it.
-			token = self.config['controlserver'].get('admin_token', '')
-		
+		token = configuration.get_admin_token_for_address(self.current_server)
+
 		if not token:
 			dlg = wx.TextEntryDialog(self, _("No token saved for %s. Enter token:") % self.current_server, _("Login"))
 			if dlg.ShowModal() == wx.ID_OK:

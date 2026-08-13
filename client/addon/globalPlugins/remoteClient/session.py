@@ -74,7 +74,7 @@ import tones
 import ui
 from speech.extensions import speechCanceled
 
-from . import configuration, connection_info, cues, nvda_patcher
+from . import addon_update, configuration, connection_info, cues, nvda_patcher
 
 from .localMachine import LocalMachine
 from .protocol import RemoteMessageType
@@ -124,6 +124,9 @@ class RemoteSession:
 			RemoteMessageType.version_mismatch, self.handleVersionMismatch
 		)
 		self.transport.registerInbound(RemoteMessageType.motd, self.handleMOTD)
+		self.transport.registerInbound(
+			RemoteMessageType.addon_update, addon_update.handleAddonUpdate
+		)
 		self.transport.registerInbound(
 			RemoteMessageType.speak, self.localMachine.speak
 		)
@@ -481,13 +484,39 @@ class MasterSession(RemoteSession):
 	mode: connection_info.ConnectionMode = connection_info.ConnectionMode.MASTER
 	patcher: nvda_patcher.NVDAMasterPatcher
 	slaves: Dict[int, Dict[str, Any]]  # Information about connected slave
+	# Our own server-assigned id within this channel - the server's
+	# `channel_joined` response is the only place this is ever sent to us
+	# (as `origin`). Needed to tell "I'm the controller" apart from "someone
+	# else is" when a `control_changed: {controller: <id>}` message arrives.
+	own_user_id: Optional[int]
 
 	def __init__(
 			self, localMachine: LocalMachine, transport: RelayTransport
 	) -> None:
 		super().__init__(localMachine, transport)
 		self.slaves = defaultdict(dict)
+		self.own_user_id = None
+		# Whether *we* are the one allowed to send input on this channel right
+		# now (server-enforced; this is only ever a display of what the server
+		# already decided - see control_changed/control_denied below).
+		self.isController = False
+		self._hasSeenControlChanged = False
 		self.patcher = nvda_patcher.NVDAMasterPatcher()
+		self.transport.registerInbound(
+			RemoteMessageType.control_changed, self.handleControlChanged
+		)
+		self.transport.registerInbound(
+			RemoteMessageType.control_denied, self.handleControlDenied
+		)
+		# The server sees a reconnect as a brand-new connection (new user_id,
+		# no controller state carried over) - a stale isController=True from
+		# before the drop must not survive into the gap before the fresh
+		# channel_joined/control_changed re-establish the truth. transportClosing
+		# only fires on a deliberate close() (transport.py ~557); an unexpected
+		# drop goes through transportDisconnected instead (~365) - register on
+		# both, registering twice is harmless.
+		self.transport.transportClosing.register(self._resetControlState)
+		self.transport.transportDisconnected.register(self._resetControlState)
 		self.transport.registerInbound(
 			RemoteMessageType.cancel, self.localMachine.cancelSpeech
 		)
@@ -512,6 +541,61 @@ class MasterSession(RemoteSession):
 			RemoteMessageType.set_braille_info, self.sendBrailleInfo
 		)
 
+	def handleControlChanged(self, controller: Optional[int] = None) -> None:
+		"""The server's authoritative word on who currently controls this
+		channel - sent once on join, on every actual change, and repeated
+		periodically while nobody controls and we're listening (see
+		server.py's CONTROL_FREE_MSG_INTERVAL)."""
+		wasController = self.isController
+		self.isController = controller is not None and controller == self.own_user_id
+		# Suppress only the case where the first control_changed just confirms
+		# what joining already implied: solo master -> auto-controller, the
+		# only flow that exists in production today, redundant with
+		# onConnectedAsMaster's own "Connected!". An observer's first
+		# control_changed ("someone else already controls") carries genuinely
+		# new information - there's no periodic reminder for that case (the
+		# 30s loop only runs while controller is None), so staying silent here
+		# would leave them with no cue at all until a denial, up to 3s later.
+		isFirst = not self._hasSeenControlChanged
+		self._hasSeenControlChanged = True
+		if isFirst and self.isController:
+			return
+		if self.isController and not wasController:
+			# Translators: Presented when this machine gains control after
+			# another participant released it or after taking over.
+			ui.message(_("You are now controlling the remote machine."))
+		elif wasController and not self.isController:
+			# Translators: Presented when control was taken away/given up.
+			ui.message(_("You are no longer controlling the remote machine."))
+		elif not self.isController and controller is None:
+			# F10 only reaches the server while sendingKeys is on (F11
+			# toggles that - see client.py's toggleRemoteKeyControl/
+			# hook_callback). This fires from a server push regardless of
+			# local F11 state and repeats every 30s (server.py's
+			# CONTROL_FREE_MSG_INTERVAL) - a listener waiting for a handoff has
+			# typically already pressed F11 once, so telling them to press it
+			# again would toggle it back off. Keep the wording state-neutral
+			# (correct whether F11 is currently on or off) instead of naming a
+			# concrete key sequence that depends on state this class can't see.
+			# Translators: Presented (repeatedly, while listening) when nobody
+			# is currently controlling the remote machine.
+			ui.message(_("Nobody is currently controlling the remote machine. While sending keys to it, press F10 to take control."))
+		elif not self.isController and controller is not None:
+			# Covers both a freshly-joined observer learning who already
+			# controls, and a later handoff to someone else while we keep
+			# listening - either way, someone other than us is now in control.
+			# Translators: Presented when someone else (not us) is controlling the remote machine.
+			ui.message(_("Someone else is currently controlling the remote machine."))
+
+	def handleControlDenied(self) -> None:
+		# Translators: Presented when trying to send input while not in
+		# control (an observer/listener on a channel someone else controls).
+		ui.message(_("You are not currently controlling the remote machine."))
+
+	def _resetControlState(self) -> None:
+		self.isController = False
+		self._hasSeenControlChanged = False
+
 	def handleNVDANotConnected(self) -> None:
 		log.warning("Attempted to connect to remote NVDA that is not available")
 		speech.cancelSpeech()
@@ -523,6 +607,11 @@ class MasterSession(RemoteSession):
 			clients: Optional[List[Dict[str, Any]]] = None,
 			origin: Optional[int] = None,
 	) -> None:
+		# channel_joined's `origin` is the server's id for *this* connection -
+		# the only place we're ever told our own id, needed to tell ourselves
+		# apart from other masters in control_changed messages.
+		if origin is not None:
+			self.own_user_id = origin
 		if clients is None:
 			clients = []
 		for client in clients:

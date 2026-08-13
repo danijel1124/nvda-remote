@@ -67,7 +67,10 @@ class GlobalPlugin(_GlobalPlugin):
 		gesture="kb:alt+NVDA+pageUp", description=_("""Connect to a remote computer""")
 	)
 	def script_connect(self, gesture):
-		if self.client.isConnected() or self.client.connecting:
+		# Connecting always means "to the control server" (slave) - a master
+		# connection to control another machine is independent and doesn't
+		# block this.
+		if self.client.isConnectedAsSlave() or self.client.connecting:
 			return
 		self.client.doConnect()
 

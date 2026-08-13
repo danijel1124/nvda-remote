@@ -257,9 +257,94 @@ Below is a detailed specification of each message type using JSONSchema:
       "type": "object",
       "properties": {
         "type": { "const": "error" },
-        "message": { "type": "string" }
+        "error": { "type": "string", "description": "Machine-readable error code, e.g. 'not_authorized', 'access_denied', 'already_joined'." },
+        "message": { "type": "string", "description": "Human-readable error text. Servers send either this or 'error' depending on the failure - clients should tolerate both being absent." }
       },
-      "required": ["type", "message"]
+      "required": ["type"]
+    }
+  }
+}
+```
+
+### Session Discovery & Control Handoff
+
+Added in v3.2 (client) / alongside it (server). Every message here is new, so an older client or server that doesn't recognize a type simply ignores it - none of these are folded into pre-existing message types (`channel_joined` in particular never gains fields), keeping this backward-compatible with already-deployed peers on either side.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "list_sessions": {
+      "type": "object",
+      "description": "Client to server, master or slave, sent on an already-joined and already-authorized connection: ask which *other* sessions on this server are online, authorized, and currently controllable (have a slave connected). The requester's own channel is excluded from the answer. Replied to with 'session_list', or with 'error'/error='not_authorized' if the requester's own channel isn't authorized yet.",
+      "properties": {
+        "type": { "const": "list_sessions" }
+      },
+      "required": ["type"]
+    },
+    "session_list": {
+      "type": "object",
+      "description": "Server to client, in response to 'list_sessions'.",
+      "properties": {
+        "type": { "const": "session_list" },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "client_count": { "type": "integer" },
+              "has_controller": { "type": "boolean" }
+            },
+            "required": ["key", "client_count", "has_controller"]
+          }
+        }
+      },
+      "required": ["type", "sessions"]
+    },
+    "control_changed": {
+      "type": "object",
+      "description": "Server to all masters on a channel (never to slaves): who currently controls it. Sent once when a master joins, on every actual change (take-over, release, disconnect of the controller), and repeated every 30s while nobody controls and at least one non-controller master is present.",
+      "properties": {
+        "type": { "const": "control_changed" },
+        "controller": {
+          "description": "The controlling master's server-assigned connection id (echoed as 'origin' on that master's own 'channel_joined'), or null/absent if nobody currently controls the channel.",
+          "type": ["integer", "null"]
+        }
+      },
+      "required": ["type"]
+    },
+    "control_denied": {
+      "type": "object",
+      "description": "Server to a master: sent instead of relaying that master's message, because they are not the channel's current controller. Sent for two distinct cases: (a) throttled (at most once per 3s), when a non-controller master's ordinary input (e.g. 'key') was silently dropped; (b) unthrottled, when a plain F10 take-over attempt was rejected because someone else already controls. A small set of housekeeping message types (e.g. 'set_braille_info') is exempt from this gating and always relayed regardless of controller status.",
+      "properties": {
+        "type": { "const": "control_denied" }
+      },
+      "required": ["type"]
+    }
+  }
+}
+```
+
+Take-over/release reuses the existing `key` message rather than adding a new wire type for the gesture itself: a plain F10 key-down from a non-controller master takes control if nobody currently controls the channel (denied via `control_denied` if someone already does); a plain F10 from the *current* controller is left alone and relayed as an ordinary keystroke; Alt+F10 from the controller releases control (the server also synthesizes a matching Alt key-up to the slave, so the controlled machine never sees a stuck Alt modifier from the interrupted chord).
+
+### Self-Update Push
+
+Added in v3.2. Sent unconditionally by the server on every new connection (like `motd`, before `join`/authorization - a quarantined or already-outdated client is exactly the one that most needs to be told to update).
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "addon_update": {
+      "type": "object",
+      "description": "Server to client: the add-on version the server expects clients to run, and where to get it. The client compares this to its own installed version and, if strictly newer, downloads and installs it automatically (no downgrade, ever - a version equal to or older than what's installed is ignored). Installing a new bundle only takes effect after NVDA is restarted; the client announces this rather than restarting NVDA on its own.",
+      "properties": {
+        "type": { "const": "addon_update" },
+        "version": { "type": "string", "description": "Dotted-numeric, e.g. \"3.2\"." },
+        "url": { "type": "string", "description": "Direct download URL for the .nvda-addon file." }
+      },
+      "required": ["type", "version", "url"]
     }
   }
 }
