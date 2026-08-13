@@ -3,7 +3,12 @@ on:
   push:
     branches: [master, main]
     tags:
-      - '*'
+      # Client tags only - the server has its own tag namespace
+      # (server-vX.Y.Z, see server/CLAUDE.md's Versioning section) and no
+      # build artifact of its own, so it must never enter this client
+      # build/release path. 'v*' naturally excludes 'server-v*' tags,
+      # since they don't start with 'v'.
+      - 'v*'
   pull_request:
     branches: [master, main]
   workflow_dispatch:
@@ -21,7 +26,10 @@ jobs:
         with:
           python-version: "3.10"
       - name: Install Dependencies
-        run: pip install scons markdown
+        # polib is needed by scons's gettexttool for compiling .mo
+        # translations (site_scons/site_tools/gettexttool) - missing it
+        # made every CI run fail before ever reaching the release step.
+        run: pip install scons markdown polib
       - name: Run Scons
         run: scons
       - name: Create and Upload Release
