@@ -417,7 +417,7 @@ Added in v1.1.0 (server) / v3.2.3 (client). Admin-only (requires `auth_admin` fi
 
 ### Consent-Gated Diagnostic Log Retrieval
 
-Added in v1.3.0 (server) / v3.3.0 (client - versions not yet cut as of writing this section). Admin-only, and separately consent-gated on the target session's own machine: `admin_request_logs` asks the server to request a specific online session's NVDA log for troubleshooting; the server relays `request_log_access` to that session's slave connection, which shows its own Yes/No dialog - nothing is read or sent without that explicit, physical answer.
+Added in v1.3.0 (server) / v3.3.0 (client). Admin-only, and separately consent-gated on the target session's own machine: `admin_request_logs` asks the server to request a specific online session's NVDA log for troubleshooting; the server relays `request_log_access` to that session's slave connection, which shows its own Yes/No dialog - nothing is read or sent without that explicit, physical answer.
 
 While a request is pending for a channel, the server denies **all** master input on that channel - not just non-controllers, the current controller too, including the F10/Alt+F10 take-over gesture. This is not a redundant precaution: this fork's remote key control (`localMachine.sendKey` → `input.send_key`) uses real Win32 `SendInput`, so an ordinary modal consent dialog on the slave does not, by itself, stop an already-connected controller from synthesizing a "Yes" onto their own consent prompt. The gate closes server-side *before* `request_log_access` is ever sent to the slave (see `server/state.py`'s `PendingLogRequest`), not after - a `key` message already in flight from the controller must not be able to land after the dialog is showing but before the gate closes.
 

@@ -67,6 +67,30 @@ class FindNvdaLogPathTests(unittest.TestCase):
 		with mock.patch.object(diagnostics.log, "handlers", [], create=True):
 			self.assertIsNone(diagnostics._findNvdaLogPath())
 
+	def test_falls_back_to_root_logger_handlers(self):
+		# This is the real-world case, confirmed against a live production
+		# NVDA instance 2026-08-14: NVDA's logHandler.initialize() calls
+		# log.root.addHandler(logHandler), not log.addHandler(...) - the
+		# FileHandler lives on the stdlib root logger, not on NVDA's own
+		# named `log` child logger, which has no handlers of its own.
+		fileHandler = mock.Mock()
+		fileHandler.baseFilename = "/tmp/nvda.log"
+		fakeRoot = mock.Mock()
+		fakeRoot.handlers = [fileHandler]
+		with mock.patch.object(diagnostics.log, "handlers", [], create=True), \
+			mock.patch.object(diagnostics.log, "root", fakeRoot, create=True):
+			self.assertEqual(diagnostics._findNvdaLogPath(), "/tmp/nvda.log")
+
+	def test_no_root_attribute_does_not_crash(self):
+		# Defensive: if some future NVDA version's `log` object has no
+		# `.root` at all, this must degrade to "not found", not raise.
+		with mock.patch.object(diagnostics.log, "handlers", [], create=True):
+			if hasattr(diagnostics.log, "root"):
+				with mock.patch.object(diagnostics.log, "root", None, create=True):
+					self.assertIsNone(diagnostics._findNvdaLogPath())
+			else:
+				self.assertIsNone(diagnostics._findNvdaLogPath())
+
 
 class ReadLogTests(unittest.TestCase):
 	def _writeTempLog(self, content: bytes):

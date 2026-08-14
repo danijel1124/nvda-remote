@@ -91,8 +91,20 @@ def _findNvdaLogPath():
 	"""Resolve wherever NVDA is actually writing its log right now, via its
 	own log handler - rather than guessing a path convention that could
 	differ by version, install type, or user config (e.g. a custom
-	-f/--log-file)."""
-	for handler in getattr(log, 'handlers', []):
+	-f/--log-file).
+
+	NVDA's logHandler.initialize() attaches the FileHandler to `log.root`
+	(the actual stdlib root logger), not to `log` itself - `log` is a named
+	child logger (logging.getLogger(NVDA_LOGGER_NAME)) with no handlers of
+	its own. Confirmed empirically 2026-08-14: the first real production
+	request against a live NVDA instance came back "could not be located"
+	because this looked at log.handlers (always empty) instead of
+	log.root.handlers (where the FileHandler actually lives). log.handlers
+	is still checked first as a harmless fallback in case some future NVDA
+	version attaches it directly after all."""
+	root = getattr(log, 'root', None)
+	candidates = list(getattr(log, 'handlers', []) or []) + list(getattr(root, 'handlers', []) or [])
+	for handler in candidates:
 		base = getattr(handler, 'baseFilename', None)
 		if base:
 			return base
