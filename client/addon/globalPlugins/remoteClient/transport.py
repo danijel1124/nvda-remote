@@ -668,6 +668,12 @@ class RelayTransport(TCPTransport):
 				# break an old peer's channel_joined/client_joined parsing
 				# either.
 				client_version=self._getOwnAddonVersion(),
+				# Opt-in only, off by default (settings_panel.py's checkbox) -
+				# do_join reads this via obj.get(), same backward-compat
+				# reasoning as client_version above. Lets the server push the
+				# rolling nightly build to this connection instead of the
+				# stable one; never relayed onward to other clients.
+				allow_beta_updates=configuration.get_config()["addon_update"]["allow_beta_updates"],
 			)
 		else:
 			self.send(RemoteMessageType.generate_key)

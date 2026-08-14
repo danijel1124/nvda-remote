@@ -46,6 +46,11 @@ configspec = StringIO("""
 	# re-install the same update on every reconnect.
 	last_handled_version = string(default="")
 	last_handled_failed = boolean(default=False)
+	# Opt-in only, off by default - self-reported on 'join' (like
+	# client_version) so the server can push the rolling nightly build to
+	# this connection instead of the stable one. See settings_panel.py's
+	# checkbox and server.py's User.allow_beta_updates.
+	allow_beta_updates = boolean(default=False)
 """)
 def get_config():
 	global _config

@@ -82,6 +82,25 @@ class VersionComparisonTests(unittest.TestCase):
 		self.assertFalse(addon_update._isNewer("not-a-version", "3.1"))
 		self.assertFalse(addon_update._isNewer("3.2", "not-a-version"))
 
+	def test_any_nightly_outranks_any_stable_version(self):
+		self.assertTrue(addon_update._isNewer("nightly-20260813203214", "3.2.3.1"))
+		self.assertTrue(addon_update._isNewer("nightly-20260101000000", "999.0"))
+
+	def test_stable_never_outranks_an_installed_nightly(self):
+		# Opting out of beta after already being on a nightly build must
+		# not silently downgrade the user back to stable.
+		self.assertFalse(addon_update._isNewer("3.2.3.1", "nightly-20260813203214"))
+
+	def test_nightlies_compare_by_timestamp(self):
+		self.assertTrue(addon_update._isNewer("nightly-20260813203214", "nightly-20260813100000"))
+		self.assertFalse(addon_update._isNewer("nightly-20260813100000", "nightly-20260813203214"))
+
+	def test_equal_nightlies_are_not_newer(self):
+		self.assertFalse(addon_update._isNewer("nightly-20260813203214", "nightly-20260813203214"))
+
+	def test_malformed_nightly_suffix_is_unparsable(self):
+		self.assertFalse(addon_update._isNewer("nightly-not-a-timestamp", "3.2.3.1"))
+
 
 class CheckAndOfferGatingTests(unittest.TestCase):
 	def setUp(self):
@@ -90,6 +109,7 @@ class CheckAndOfferGatingTests(unittest.TestCase):
 		conf = configuration.get_config()
 		conf["addon_update"]["last_handled_version"] = ""
 		conf["addon_update"]["last_handled_failed"] = False
+		conf["addon_update"]["allow_beta_updates"] = False
 		self._threadPatch = mock.patch.object(addon_update.threading, "Thread", _SyncThread)
 		self._threadPatch.start()
 		self.addCleanup(self._threadPatch.stop)
@@ -138,6 +158,80 @@ class CheckAndOfferGatingTests(unittest.TestCase):
 		with mock.patch.object(addon_update, "_downloadAndInstall") as dl:
 			addon_update._checkAndOffer("3.3", "https://example.org/x.nvda-addon")
 			dl.assert_called_once_with("3.3", "https://example.org/x.nvda-addon")
+
+	def test_stable_push_installs_over_a_running_nightly_once_beta_is_off(self):
+		"""A user who opted into beta, got a nightly installed, and then
+		unchecked the box must still receive future stable releases - the
+		rank tuple in _isNewer alone would consider every stable version
+		"older" than the nightly forever (see _parseVersion's docstring),
+		which would otherwise be a permanent one-way trap."""
+		conf = configuration.get_config()
+		conf["addon_update"]["allow_beta_updates"] = False
+		conf["addon_update"]["last_handled_version"] = "nightly-20260813203214"
+		fakeAddon = mock.MagicMock()
+		fakeAddon.version = "nightly-20260813203214"
+		with mock.patch.object(addon_update.addonHandler, "getCodeAddon", return_value=fakeAddon), \
+			mock.patch.object(addon_update, "_downloadAndInstall") as dl:
+			addon_update._checkAndOffer("3.2.4", "https://example.org/x.nvda-addon")
+			dl.assert_called_once_with("3.2.4", "https://example.org/x.nvda-addon")
+
+	def test_stable_push_not_reinstalled_once_already_handled_while_restart_pending(self):
+		"""Regression for the re-install/re-nag loop: once _markHandled() has
+		recorded the stable version, installedVersion alone (still reporting
+		the nightly until NVDA actually restarts) must not keep re-tripping
+		the channel-switch exception on every reconnect."""
+		conf = configuration.get_config()
+		conf["addon_update"]["allow_beta_updates"] = False
+		conf["addon_update"]["last_handled_version"] = "3.2.4"
+		fakeAddon = mock.MagicMock()
+		fakeAddon.version = "nightly-20260813203214"
+		with mock.patch.object(addon_update.addonHandler, "getCodeAddon", return_value=fakeAddon), \
+			mock.patch.object(addon_update, "_downloadAndInstall") as dl:
+			addon_update._checkAndOffer("3.2.4", "https://example.org/x.nvda-addon")
+			dl.assert_not_called()
+
+	def test_later_stable_release_still_installs_during_the_pending_restart_window(self):
+		"""The still-pending installedVersion must stay a live gate for a
+		*newer* stable release even after an earlier one was already handled
+		(mirrors production: addon_update fires on every reconnect until
+		NVDA restarts)."""
+		conf = configuration.get_config()
+		conf["addon_update"]["allow_beta_updates"] = False
+		conf["addon_update"]["last_handled_version"] = "3.2.4"
+		fakeAddon = mock.MagicMock()
+		fakeAddon.version = "nightly-20260813203214"
+		with mock.patch.object(addon_update.addonHandler, "getCodeAddon", return_value=fakeAddon), \
+			mock.patch.object(addon_update, "_downloadAndInstall") as dl:
+			addon_update._checkAndOffer("3.2.5", "https://example.org/x.nvda-addon")
+			dl.assert_called_once_with("3.2.5", "https://example.org/x.nvda-addon")
+
+	def test_nightly_still_wins_while_beta_stays_on(self):
+		"""Sanity check that the channel-switch exception above doesn't
+		accidentally suppress normal nightly-over-nightly updates while beta
+		is still opted in."""
+		conf = configuration.get_config()
+		conf["addon_update"]["allow_beta_updates"] = True
+		conf["addon_update"]["last_handled_version"] = "nightly-20260813100000"
+		fakeAddon = mock.MagicMock()
+		fakeAddon.version = "nightly-20260813100000"
+		with mock.patch.object(addon_update.addonHandler, "getCodeAddon", return_value=fakeAddon), \
+			mock.patch.object(addon_update, "_downloadAndInstall") as dl:
+			addon_update._checkAndOffer("nightly-20260813203214", "https://example.org/x.nvda-addon")
+			dl.assert_called_once_with("nightly-20260813203214", "https://example.org/x.nvda-addon")
+
+	def test_stable_push_ignored_while_beta_stays_on(self):
+		"""The channel-switch exception must only fire when beta updates are
+		off - an opted-in user isn't being "switched back", the server
+		simply hasn't pushed a newer nightly yet."""
+		conf = configuration.get_config()
+		conf["addon_update"]["allow_beta_updates"] = True
+		conf["addon_update"]["last_handled_version"] = "nightly-20260813203214"
+		fakeAddon = mock.MagicMock()
+		fakeAddon.version = "nightly-20260813203214"
+		with mock.patch.object(addon_update.addonHandler, "getCodeAddon", return_value=fakeAddon), \
+			mock.patch.object(addon_update, "_downloadAndInstall") as dl:
+			addon_update._checkAndOffer("3.2.4", "https://example.org/x.nvda-addon")
+			dl.assert_not_called()
 
 	def test_missing_version_or_url_is_ignored(self):
 		with mock.patch.object(addon_update, "_checkAndOffer") as check:

@@ -35,6 +35,7 @@ auto-restart NVDA - see client/addon/globalPlugins/remoteClient/addon_update.py)
 """
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -51,6 +52,12 @@ DEFAULT_INTERVAL_HOURS = 24
 CONFIG_FILENAME = "server_config.json"
 STATE_FILENAME = "server_update_check.json"
 ADDON_RELEASE_FILENAME = "addon_release.json"  # same file server.py's ADDON_RELEASE_FILE points at
+# Same file server.py's ADDON_BETA_RELEASE_FILE points at - the rolling
+# nightly build, only ever pushed to a connection that opted into
+# allow_beta_updates (see make_nightly.sh, server.py's
+# User.allow_beta_updates).
+ADDON_BETA_RELEASE_FILENAME = "addon_beta_release.json"
+NIGHTLY_TAG = "nightly"
 
 
 def _parse_version(v):
@@ -293,21 +300,87 @@ def check_for_client_update(data_dir, log=None):
 	return result
 
 
+def check_for_client_beta_update(data_dir, log=None):
+	"""Blocking - same threading rules as check_for_update. Mirrors
+	check_for_client_update, but for the rolling "nightly" release
+	(make_nightly.sh) instead of the latest official vX.Y.Z one.
+
+	Unlike the stable check, this doesn't rank among releases by parsed
+	semver - "nightly" isn't semantically versioned at all (its own
+	manifest version is a build timestamp, e.g. "nightly-20260813203214",
+	which _best_release's numeric parser can't meaningfully rank anyway).
+	Instead it's identified by tag name, and the actual version string to
+	advertise is extracted from its .nvda-addon asset's filename
+	(remote-<version>.nvda-addon), which make_nightly.sh names to match
+	the manifest version it built.
+
+	Always overwrites data/addon_beta_release.json when a nightly release
+	with a usable asset is found - there's no "is this newer" gate here
+	(unlike check_for_client_update): the nightly tag is a single rolling
+	build, not a sequence of releases to compare against each other. The
+	actual "is this newer than what's installed" decision happens
+	client-side (addon_update.py), and only for a client that opted in
+	via allow_beta_updates in the first place - a stable client never
+	reads this file at all (see server.py's User.send_addon_update).
+	"""
+	def _log(msg):
+		if log is not None:
+			log(msg)
+
+	result = {'version': None, 'updated': False, 'url': None, 'error': None}
+	try:
+		releases = _fetch_releases()
+		nightly = next((r for r in releases if r.get('tag_name') == NIGHTLY_TAG), None)
+		if nightly is None:
+			_log(f"Beta update check: no '{NIGHTLY_TAG}' release found on GitHub ({GITHUB_REPO})")
+			return result
+
+		version_str = None
+		url = None
+		for asset in nightly.get('assets') or []:
+			name = asset.get('name') or ''
+			m = re.match(r'^remote-(.+)\.nvda-addon$', name)
+			if m:
+				version_str = m.group(1)
+				url = asset.get('browser_download_url')
+				break
+		if version_str is None or url is None:
+			_log(f"Beta update check: '{NIGHTLY_TAG}' release has no .nvda-addon asset - skipping")
+			return result
+
+		result['version'] = version_str
+		result['url'] = url
+		_atomic_write_json(os.path.join(data_dir, ADDON_BETA_RELEASE_FILENAME), data_dir, {'version': version_str, 'url': url})
+		result['updated'] = True
+		_log(f"Beta update available: {version_str} ({url})")
+	except Exception as e:
+		result['error'] = str(e)
+		_log(f"Beta update check failed: {e}")
+
+	return result
+
+
 def run_scheduled_checks(server_version, data_dir, log=None):
 	"""Entry point for the running server's scheduled LoopingCall (see
 	server.py's _scheduled_update_check), the manual check_server_update.py
 	CLI script, and the admin-triggered do_admin_check_for_updates command:
-	runs both the server's own self-update check and the client-release
-	auto-detect/apply check, under the one configured interval
-	(is_check_due, gated by the caller - this function itself doesn't
-	check due-ness, it just performs both checks unconditionally when
-	called - an explicit "check now" request should never be silently
-	skipped because the timer isn't due yet).
+	runs the server's own self-update check, the stable client-release
+	auto-detect/apply check, and the beta (nightly) one, under the one
+	configured interval (is_check_due, gated by the caller - this function
+	itself doesn't check due-ness, it just performs all three
+	unconditionally when called - an explicit "check now" request should
+	never be silently skipped because the timer isn't due yet). The beta
+	check runs regardless of whether any client is currently opted in, so
+	data/addon_beta_release.json is already fresh the moment someone
+	does opt in.
 
-	Returns {'server': <check_for_update result>, 'client': <check_for_client_update result>}
-	so callers that need the fresh results (the admin GUI's "check now"
-	button) don't have to re-read state files themselves.
+	Returns {'server': ..., 'client': ..., 'client_beta': ...} - see
+	check_for_update/check_for_client_update/check_for_client_beta_update
+	respectively - so callers that need the fresh results (the admin
+	GUI's "check now" button) don't have to re-read state files
+	themselves.
 	"""
 	server_result = check_for_update(server_version, data_dir, log)
 	client_result = check_for_client_update(data_dir, log)
-	return {'server': server_result, 'client': client_result}
+	client_beta_result = check_for_client_beta_update(data_dir, log)
+	return {'server': server_result, 'client': client_result, 'client_beta': client_beta_result}

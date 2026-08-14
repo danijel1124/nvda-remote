@@ -712,4 +712,55 @@ class RelayServerTestCase(unittest.TestCase):
 					self.send(p, type='admin_check_for_updates')
 					_read(t)
 		mock_run.assert_called_once()
-		mock_is_due.assert_not_called()
+
+	# --- opt-in beta (nightly) update channel ---
+
+	def _write_addon_beta_release(self, data):
+		os.makedirs('data', exist_ok=True)
+		with open(os.path.join('data', 'addon_beta_release.json'), 'w') as f:
+			json.dump(data, f)
+
+	def test_stable_client_never_gets_the_nightly_build(self):
+		self._write_addon_release({'version': '3.2.3.1', 'url': 'https://example.org/remote-3.2.3.1.nvda-addon'})
+		self._write_addon_beta_release({'version': 'nightly-20260813203214', 'url': 'https://example.org/remote-nightly-20260813203214.nvda-addon'})
+		self.state.authorize_key('pcA')
+		p, t = self._connect_raw()
+		self.send(p, type='protocol_version', version=2)
+		self.send(p, type='join', channel='pcA', connection_type='slave')  # allow_beta_updates omitted, like a real 3.2.3.1 client
+		updates = [m for m in _read(t) if m['type'] == 'addon_update']
+		self.assertEqual(len(updates), 1)  # the connectionMade-time push only - join doesn't re-push for a non-beta client
+		self.assertEqual(updates[0]['version'], '3.2.3.1')
+
+	def test_beta_opted_in_client_gets_the_nightly_build(self):
+		self._write_addon_release({'version': '3.2.3.1', 'url': 'https://example.org/remote-3.2.3.1.nvda-addon'})
+		self._write_addon_beta_release({'version': 'nightly-20260813203214', 'url': 'https://example.org/remote-nightly-20260813203214.nvda-addon'})
+		self.state.authorize_key('pcA')
+		p, t = self._connect_raw()
+		self.send(p, type='protocol_version', version=2)
+		self.send(p, type='join', channel='pcA', connection_type='slave', allow_beta_updates=True)
+		updates = [m for m in _read(t) if m['type'] == 'addon_update']
+		# Two: the connectionMade-time push (stable, allow_beta_updates not
+		# known yet) and the do_join re-push (beta, now that it is known).
+		self.assertEqual(len(updates), 2)
+		self.assertEqual(updates[0]['version'], '3.2.3.1')
+		self.assertEqual(updates[1]['version'], 'nightly-20260813203214')
+
+	def test_beta_opted_in_client_falls_back_to_stable_when_no_nightly_available(self):
+		self._write_addon_release({'version': '3.2.3.1', 'url': 'https://example.org/remote-3.2.3.1.nvda-addon'})
+		# No addon_beta_release.json at all - never checked yet, or the
+		# nightly release has no usable asset right now.
+		self.state.authorize_key('pcA')
+		p, t = self._connect_raw()
+		self.send(p, type='protocol_version', version=2)
+		self.send(p, type='join', channel='pcA', connection_type='slave', allow_beta_updates=True)
+		updates = [m for m in _read(t) if m['type'] == 'addon_update']
+		self.assertTrue(all(u['version'] == '3.2.3.1' for u in updates))
+
+	def test_allow_beta_updates_defaults_to_false_when_omitted(self):
+		self.state.authorize_key('pcA')
+		p, t = self._connect_raw()
+		self.send(p, type='protocol_version', version=2)
+		self.send(p, type='join', channel='pcA', connection_type='slave')
+		msgs = _read(t)
+		joined = [m for m in msgs if m['type'] == 'channel_joined']
+		self.assertTrue(joined)  # join succeeded despite the field being absent

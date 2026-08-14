@@ -9,6 +9,13 @@ _scheduled_update_check / update_check.py). Runs both halves:
 - the client-release auto-detect check - if there's a newer *official*
   client vX.Y.Z release, this one *does* apply it: data/addon_release.json
   is atomically overwritten, same as running set_addon_release.py by hand.
+- the client beta (nightly) auto-detect check - if the rolling "nightly"
+  GitHub release has moved on, this one *does* apply it too:
+  data/addon_beta_release.json is atomically overwritten (see
+  update_check.py's check_for_client_beta_update). Only clients that opted
+  in via the "Allow beta (nightly, untested) updates" checkbox ever receive
+  it (server.py's User.allow_beta_updates) - this just keeps the file
+  current so that channel has something to serve once someone opts in.
 
 Fully standalone - queries GitHub directly and prints the result. Does not
 talk to the live server process (no IPC/signal needed); it just writes the
@@ -40,7 +47,8 @@ def main():
 
 	server_result = update_check.check_for_update(server.SERVER_VERSION, args.data_dir, print)
 	client_result = update_check.check_for_client_update(args.data_dir, print)
-	sys.exit(1 if (server_result['error'] or client_result['error']) else 0)
+	client_beta_result = update_check.check_for_client_beta_update(args.data_dir, print)
+	sys.exit(1 if (server_result['error'] or client_result['error'] or client_beta_result['error']) else 0)
 
 
 if __name__ == "__main__":

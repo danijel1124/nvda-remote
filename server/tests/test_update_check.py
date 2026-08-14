@@ -248,5 +248,90 @@ class UpdateCheckTests(unittest.TestCase):
 		self.assertEqual(current['version'], "3.2.2")  # client check applied
 
 
+class ClientBetaUpdateTests(unittest.TestCase):
+	"""check_for_client_beta_update - the rolling 'nightly' release, tracked
+	separately from the stable channel (data/addon_beta_release.json)."""
+
+	def setUp(self):
+		self.data_dir = tempfile.mkdtemp()
+
+	def tearDown(self):
+		shutil.rmtree(self.data_dir, ignore_errors=True)
+
+	def _nightly_release(self, build_id, asset=True):
+		return {
+			'tag_name': 'nightly',
+			'prerelease': True,
+			'draft': False,
+			'assets': (
+				[{'name': f'remote-{build_id}.nvda-addon', 'browser_download_url': f'https://example.org/remote-{build_id}.nvda-addon'}]
+				if asset else []
+			),
+		}
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_writes_addon_beta_release_from_nightly_tag(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response([
+			self._nightly_release('nightly-20260813203214'),
+			{'tag_name': 'v3.2.3.1', 'prerelease': False, 'draft': False, 'assets': []},
+		])
+		result = update_check.check_for_client_beta_update(self.data_dir)
+		self.assertTrue(result['updated'])
+		self.assertEqual(result['version'], 'nightly-20260813203214')
+		with open(os.path.join(self.data_dir, update_check.ADDON_BETA_RELEASE_FILENAME)) as f:
+			data = json.load(f)
+		self.assertEqual(data['version'], 'nightly-20260813203214')
+		self.assertEqual(data['url'], 'https://example.org/remote-nightly-20260813203214.nvda-addon')
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_no_nightly_tag_leaves_file_untouched(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response([
+			{'tag_name': 'v3.2.3.1', 'prerelease': False, 'draft': False, 'assets': []},
+		])
+		result = update_check.check_for_client_beta_update(self.data_dir)
+		self.assertFalse(result['updated'])
+		self.assertIsNone(result['error'])
+		self.assertFalse(os.path.exists(os.path.join(self.data_dir, update_check.ADDON_BETA_RELEASE_FILENAME)))
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_nightly_tag_without_addon_asset_is_skipped(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response([
+			self._nightly_release('nightly-20260813203214', asset=False),
+		])
+		result = update_check.check_for_client_beta_update(self.data_dir)
+		self.assertFalse(result['updated'])
+		self.assertIsNone(result['error'])
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_always_overwrites_on_each_new_nightly_build(self, mock_urlopen):
+		"""No 'is this newer' gate here, unlike the stable channel - the
+		nightly tag is a single rolling build, always mirror whatever's
+		currently there. Client-side (addon_update.py) is what actually
+		decides whether to install it."""
+		mock_urlopen.return_value = _fake_response([self._nightly_release('nightly-20260813100000')])
+		update_check.check_for_client_beta_update(self.data_dir)
+		mock_urlopen.return_value = _fake_response([self._nightly_release('nightly-20260813203214')])
+		update_check.check_for_client_beta_update(self.data_dir)
+		with open(os.path.join(self.data_dir, update_check.ADDON_BETA_RELEASE_FILENAME)) as f:
+			data = json.load(f)
+		self.assertEqual(data['version'], 'nightly-20260813203214')
+
+	@mock.patch('update_check.urllib.request.urlopen', side_effect=OSError("network unreachable"))
+	def test_network_failure_does_not_raise(self, mock_urlopen):
+		result = update_check.check_for_client_beta_update(self.data_dir)
+		self.assertIsNotNone(result['error'])
+		self.assertFalse(result['updated'])
+
+	@mock.patch('update_check.urllib.request.urlopen')
+	def test_run_scheduled_checks_includes_client_beta(self, mock_urlopen):
+		mock_urlopen.return_value = _fake_response([
+			self._nightly_release('nightly-20260813203214'),
+			{'tag_name': 'v3.2.3.1', 'prerelease': False, 'draft': False, 'assets': []},
+			{'tag_name': 'server-v1.1.0', 'prerelease': False, 'draft': False, 'assets': []},
+		])
+		combined = update_check.run_scheduled_checks("1.1.0", self.data_dir)
+		self.assertEqual(combined['client_beta']['version'], 'nightly-20260813203214')
+
+
 if __name__ == '__main__':
 	unittest.main()

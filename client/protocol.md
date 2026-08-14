@@ -43,7 +43,8 @@ Below is a detailed specification of each message type using JSONSchema:
         "type": { "const": "join" },
         "channel": { "type": "string" },
         "connection_type": { "enum": ["master", "slave"] },
-        "client_version": { "type": "string", "description": "Added in v3.2.2. Optional self-reported add-on version, dotted-numeric e.g. \"3.2.2\". Older clients omit it. Admin-visibility only (surfaces in the admin_list_channels response) - never echoed back into channel_joined/client_joined, which other, non-admin clients also parse." }
+        "client_version": { "type": "string", "description": "Added in v3.2.2. Optional self-reported add-on version, dotted-numeric e.g. \"3.2.2\". Older clients omit it. Admin-visibility only (surfaces in the admin_list_channels response) - never echoed back into channel_joined/client_joined, which other, non-admin clients also parse." },
+        "allow_beta_updates": { "type": "boolean", "description": "Added in v3.2.4/server v1.2.0. Optional, defaults to false server-side if omitted (older clients). Set from settings_panel.py's 'Allow beta updates' checkbox - true means the server's addon_update push for this connection picks the rolling nightly build (data/addon_beta_release.json) instead of the latest stable release, falling back to stable if no nightly build is available yet. Never echoed back to peers." }
       },
       "required": ["type", "channel", "connection_type"]
     },

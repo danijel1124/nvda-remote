@@ -8,7 +8,13 @@ If that's newer than what this install last handled, download it and install
 it automatically - no confirmation dialog, that's the point of "automatic".
 
 Two things this deliberately does NOT do:
-- Never downgrade automatically: only a strictly newer version is acted on.
+- Never downgrade automatically: only a strictly newer version is acted on -
+  with one deliberate exception, _checkAndOffer's channel-switch case: a
+  client that opted into beta, landed on a nightly build, and then unchecked
+  the box must still be able to receive ordinary stable releases afterwards,
+  even though a nightly always outranks a stable version by version number
+  alone (see _parseVersion). Without that exception, trying beta once would
+  be a one-way door out of all future stable updates.
 - Never restart NVDA automatically: installAddonBundle only marks the update
   as pending until NVDA restarts (NVDA can't hot-swap already-imported code),
   and silently restarting out from under a screen-reader user mid-task would
@@ -46,12 +52,37 @@ from . import configuration
 _checking = False
 
 
+NIGHTLY_PREFIX = "nightly-"  # see ../../../../make_nightly.sh
+
+
 def _parseVersion(version):
-	"""Best-effort dotted-numeric version parse for comparison. Returns None
-	if it doesn't look like one, so callers can fall back to "don't act"
-	instead of guessing at an ordering for e.g. a garbled version string."""
+	"""Best-effort version parse for comparison. Returns None if it doesn't
+	look like either recognized shape, so callers can fall back to "don't
+	act" instead of guessing at an ordering for e.g. a garbled version
+	string.
+
+	Two shapes, given a (rank, payload) tuple so they compare consistently
+	against each other via plain tuple comparison (Python can't compare a
+	str payload against an int-tuple payload directly, hence the rank):
+	- Dotted-numeric stable releases, e.g. "3.2.3.1" -> (0, (3, 2, 3, 1)).
+	- Nightly builds, e.g. "nightly-20260813203214" -> (1, "20260813203214").
+	  Rank 1 always outranks rank 0: a nightly is built from the current
+	  HEAD, which is always at least as new as the latest tagged stable
+	  release, so any nightly counts as newer than any stable version. Two
+	  nightlies compare by their zero-padded UTC timestamp suffix, which
+	  sorts correctly as a plain string. This only ever matters for a
+	  client that opted into beta updates (settings_panel.py) - a client
+	  that didn't never receives a nightly version string to compare
+	  against in the first place (see server.py's User.allow_beta_updates).
+	"""
+	s = str(version).strip()
+	if s.startswith(NIGHTLY_PREFIX):
+		suffix = s[len(NIGHTLY_PREFIX):]
+		if suffix.isdigit():
+			return (1, suffix)
+		return None
 	try:
-		return tuple(int(part) for part in str(version).strip().split("."))
+		return (0, tuple(int(part) for part in s.split(".")))
 	except (ValueError, AttributeError):
 		return None
 
@@ -78,18 +109,54 @@ def handleAddonUpdate(version=None, url=None):
 
 
 def _checkAndOffer(version, url):
-	global _checking
 	conf = configuration.get_config()
 	state = conf["addon_update"]
 	lastHandled = state["last_handled_version"]
-	if lastHandled and not _isNewer(version, lastHandled):
-		# Already installed (or already tried and failed) this exact version
-		# or newer - checked first and authoritative, regardless of what the
-		# installed version currently reports. See the module docstring.
-		return
 	installedVersion = addonHandler.getCodeAddon().version
+	# Explicit channel switch back to stable: _isNewer's rank tuple makes any
+	# nightly outrank any stable version unconditionally (see _parseVersion),
+	# which is correct while beta updates stay opted in but would otherwise
+	# be a one-way door - a user who tries beta once and then unchecks the
+	# box would never receive another stable update, ever, because the
+	# nightly they're running (or last handled) always compares as "newer"
+	# than every future stable release.
+	#
+	# This exception is attached to *each* gate separately, keyed on that
+	# gate's own operand, rather than bypassing both gates together - the two
+	# operands go stale independently. installedVersion keeps reporting the
+	# nightly until NVDA actually restarts (see configuration.py's comment on
+	# last_handled_version), which can be an arbitrarily long time after a
+	# stable version was already downloaded and installed pending restart
+	# (the restart offer can be declined). If the switch-back bypassed both
+	# gates together, every reconnect in that window would re-download and
+	# re-nag with another restart dialog, because installedVersion alone
+	# would keep tripping the exception even though lastHandled already
+	# proves this exact version was handled. Keying gate 1 on lastHandled's
+	# own rank means _markHandled() (which stores the plain stable version
+	# string) closes that gate for good once handled, while gate 2 staying
+	# open on installedVersion's rank still lets a *later* stable release
+	# install during that same pending-restart window.
+	switchingBackToStable = (
+		not state["allow_beta_updates"]
+		and (_parseVersion(version) or (None,))[0] == 0
+	)
+	if lastHandled and not _isNewer(version, lastHandled):
+		lastHandledRank = (_parseVersion(lastHandled) or (0,))[0]
+		if not (switchingBackToStable and lastHandledRank == 1):
+			# Already installed (or already tried and failed) this exact
+			# version or newer - checked first and authoritative, regardless
+			# of what the installed version currently reports. See the
+			# module docstring.
+			return
+	installedRank = (_parseVersion(installedVersion) or (0,))[0]
 	if not _isNewer(version, installedVersion):
-		return
+		if not (switchingBackToStable and installedRank == 1):
+			return
+	_startDownload(version, url)
+
+
+def _startDownload(version, url):
+	global _checking
 	if _checking:
 		return
 	_checking = True

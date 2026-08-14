@@ -10,6 +10,7 @@ class RemoteSettingsPanel(SettingsPanel):
 	host: wx.TextCtrl
 	key: wx.TextCtrl
 	play_sounds: wx.CheckBox
+	allow_beta_updates: wx.CheckBox
 	delete_fingerprints: wx.Button
 
 	def makeSettings(self, settingsSizer):
@@ -35,7 +36,11 @@ class RemoteSettingsPanel(SettingsPanel):
 		# Translators: A checkbox in add-on options dialog to set whether sounds play instead of beeps.
 		self.play_sounds = wx.CheckBox(self, wx.ID_ANY, label=_("Play sounds instead of beeps"))
 		sHelper.addItem(self.play_sounds)
-		
+
+		# Translators: A checkbox in add-on options dialog to opt into unstable nightly builds pushed by the server.
+		self.allow_beta_updates = wx.CheckBox(self, wx.ID_ANY, label=_("Allow beta (nightly, untested) updates"))
+		sHelper.addItem(self.allow_beta_updates)
+
 		# Translators: A button in add-on options dialog to delete all fingerprints of unauthorized certificates.
 		self.delete_fingerprints = wx.Button(self, wx.ID_ANY, label=_("Delete all trusted fingerprints"))
 		self.delete_fingerprints.Bind(wx.EVT_BUTTON, self.on_delete_fingerprints)
@@ -59,6 +64,7 @@ class RemoteSettingsPanel(SettingsPanel):
 		self.key.SetValue(cs['key'])
 		self.set_controls()
 		self.play_sounds.SetValue(self.config['ui']['play_sounds'])
+		self.allow_beta_updates.SetValue(self.config['addon_update']['allow_beta_updates'])
 
 	def on_delete_fingerprints(self, evt: wx.CommandEvent) -> None:
 		if gui.messageBox(_("When connecting to an unauthorized server, you will again be prompted to accepts its certificate."), _("Are you sure you want to delete all stored trusted fingerprints?"), wx.YES|wx.NO|wx.NO_DEFAULT|wx.ICON_WARNING) == wx.YES:
@@ -82,6 +88,7 @@ class RemoteSettingsPanel(SettingsPanel):
 		cs['host'] = self.host.GetValue()
 		cs['key'] = self.key.GetValue()
 		self.config['ui']['play_sounds'] = self.play_sounds.GetValue()
+		self.config['addon_update']['allow_beta_updates'] = self.allow_beta_updates.GetValue()
 		self.config.write()
 
 	def onSave(self):

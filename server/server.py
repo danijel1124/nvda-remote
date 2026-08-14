@@ -26,7 +26,7 @@ log.startLogging(sys.stdout)
 # despite carrying substantial features (whitelist/quarantine, admin API,
 # controller/observer model, add-on self-update push) - 1.0.0 marks that
 # first tagged/released baseline, not a "rewrite" or a reset of history.
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 
 PING_INTERVAL = 300
 INITIAL_TIMEOUT = 30
@@ -64,6 +64,11 @@ ADMIN_TOKEN_FILE = os.path.join(DATA_DIR, "admin.token")
 # a new client release never requires restarting the server. Absent/empty is
 # the default "nothing to push" state.
 ADDON_RELEASE_FILE = os.path.join(DATA_DIR, "addon_release.json")
+# Same shape as ADDON_RELEASE_FILE, but for the rolling nightly build (see
+# make_nightly.sh / update_check.py's check_for_client_beta_update) - only
+# ever pushed to a connection that opted in via allow_beta_updates. Stable
+# clients never read this file at all.
+ADDON_BETA_RELEASE_FILE = os.path.join(DATA_DIR, "addon_beta_release.json")
 
 # How often (a base tick, not the actual check interval) the server looks at
 # data/server_config.json to decide whether a scheduled self-update check is
@@ -556,7 +561,15 @@ class Handler(LineReceiver):
 			obj['channel'],
 			connection_type=obj.get('connection_type'),
 			client_version=obj.get('client_version'),
+			allow_beta_updates=obj.get('allow_beta_updates', False),
 		)
+		if self.user.allow_beta_updates:
+			# The connectionMade-time send_addon_update() ran before join,
+			# when allow_beta_updates wasn't known yet, so it could only
+			# have pushed the stable channel - re-push now that it's known,
+			# this time picking the beta channel. See send_addon_update's
+			# docstring.
+			self.user.send_addon_update()
 		self.cleanup_timer.cancel()
 
 	def do_protocol_version(self, obj):
@@ -596,6 +609,13 @@ class User(object):
 		# messages risk breaking already-deployed clients with fixed
 		# handlers.
 		self.client_version = None
+		# Self-reported by the client in its 'join' message (optional bool,
+		# off by default - older clients don't send it, which is the same
+		# as sending False). Set from settings_panel.py's "Allow beta
+		# updates" checkbox - True means send_addon_update pushes the
+		# rolling nightly build to this connection instead of the stable
+		# one. See ADDON_BETA_RELEASE_FILE below.
+		self.allow_beta_updates = False
 		self.user_id = User.user_id + 1
 		User.user_id += 1
 		self.is_admin = False
@@ -642,12 +662,13 @@ class User(object):
 		if self.channel is not None:
 			self.channel.remove_connection(self)
 
-	def join(self, channel, connection_type, client_version=None):
+	def join(self, channel, connection_type, client_version=None, allow_beta_updates=False):
 		if self.channel:
 			self.send(type="error", error="already_joined")
 			return
 		self.connection_type = connection_type
 		self.client_version = client_version
+		self.allow_beta_updates = bool(allow_beta_updates)
 		self.channel = self.server_state.find_or_create_channel(channel)
 		self.channel.add_client(self)
 
@@ -665,7 +686,22 @@ class User(object):
 		# One consequence: the addon_release.json url is reachable by any
 		# host that can open a TCP connection to the relay, not just
 		# authorized ones - treat its contents as effectively public.
-		version, url = self.server_state.get_addon_release()
+		#
+		# Called twice for a beta-opted-in client: once from
+		# Handler.connectionMade (before join, so allow_beta_updates isn't
+		# known yet - always picks the stable channel here), and again from
+		# Handler.do_join once allow_beta_updates is actually known, this
+		# time picking the beta channel if opted in. Harmless - client-side
+		# gating (addon_update.py's last_handled_version) already tolerates
+		# a repeated push of the same or an older version.
+		if self.allow_beta_updates:
+			version, url = self.server_state.get_addon_beta_release()
+			if not (version and url):
+				# No nightly build available yet - fall back to stable
+				# rather than push nothing to an opted-in client.
+				version, url = self.server_state.get_addon_release()
+		else:
+			version, url = self.server_state.get_addon_release()
 		if version and url:
 			self.send(type='addon_update', version=version, url=url)
 
@@ -782,10 +818,19 @@ class ServerState(object):
 		missing/malformed/half-written file must degrade to "push nothing"
 		rather than break every new connection (same precedent as
 		load_seen_keys' bare except)."""
+		return self._read_release_file(ADDON_RELEASE_FILE)
+
+	def get_addon_beta_release(self):
+		"""Same as get_addon_release, but for ADDON_BETA_RELEASE_FILE (the
+		rolling nightly build) - only ever consulted for a connection that
+		opted into allow_beta_updates."""
+		return self._read_release_file(ADDON_BETA_RELEASE_FILE)
+
+	def _read_release_file(self, path):
 		try:
-			if not os.path.exists(ADDON_RELEASE_FILE):
+			if not os.path.exists(path):
 				return None, None
-			with open(ADDON_RELEASE_FILE, 'r') as f:
+			with open(path, 'r') as f:
 				data = json.load(f)
 			version = data.get('version')
 			url = data.get('url')
@@ -793,7 +838,7 @@ class ServerState(object):
 				return None, None
 			return version, url
 		except Exception as e:
-			log.err(f"Failed to read addon release info: {e}")
+			log.err(f"Failed to read release info from {path}: {e}")
 			return None, None
 
 	def load_or_generate_admin_token(self):
