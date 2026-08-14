@@ -77,6 +77,20 @@ class RemoteMessageType(Enum):
     get_server_info = "get_server_info"    # request: no payload
     server_info = "server_info"            # response: {version: "1.1.0", update_check: {...} | None}
 
+    # Consent-gated diagnostic log retrieval (admin-initiated) - see
+    # server/state.py's PendingLogRequest and diagnostics.py. Admin asks the
+    # server for a specific session's NVDA log; the server relays a consent
+    # request to that session's slave connection and, while it's pending,
+    # denies ALL master input on that channel (not just the current
+    # controller) - remote key control here uses real Win32 SendInput
+    # (input.py's send_key), so an ordinary modal dialog alone would not
+    # stop an already-connected controller from approving its own request.
+    admin_request_logs = "admin_request_logs"        # admin request: {key: <session>}
+    admin_log_upload_status = "admin_log_upload_status"  # response to the admin: {key, status: denied|timeout|error|saved, detail, truncated}
+    request_log_access = "request_log_access"         # server -> slave: no payload
+    log_access_response = "log_access_response"       # slave -> server: {granted: bool}
+    log_upload = "log_upload"                         # slave -> server: {content: str, truncated: bool}
+
 
 SERVER_PORT = 6837
 URL_PREFIX = 'nvdaremote://'

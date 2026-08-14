@@ -1,6 +1,3 @@
-import logging
-import sys
-
 import addonHandler
 import ui
 from globalPluginHandler import GlobalPlugin as _GlobalPlugin
@@ -16,8 +13,6 @@ except addonHandler.AddonError:
 		"Unable to initialise translations. This may be because the addon is running from NVDA scratchpad."
 	)
 
-
-logging.getLogger("keyboard_hook").addHandler(logging.StreamHandler(sys.stdout))
 
 class GlobalPlugin(_GlobalPlugin):
 	scriptCategory: str = _("NVDA Remote")

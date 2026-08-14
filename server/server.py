@@ -18,6 +18,8 @@ import update_check
 from state import (
 	Channel,
 	ServerState,
+	PendingLogRequest,
+	save_diagnostic_log,
 	DATA_DIR,
 	ADDON_RELEASE_FILE,
 	ADDON_BETA_RELEASE_FILE,
@@ -34,7 +36,7 @@ log.startLogging(sys.stdout)
 # despite carrying substantial features (whitelist/quarantine, admin API,
 # controller/observer model, add-on self-update push) - 1.0.0 marks that
 # first tagged/released baseline, not a "rewrite" or a reset of history.
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.3.0"
 
 PING_INTERVAL = 300
 INITIAL_TIMEOUT = 30
@@ -43,6 +45,11 @@ GENERATED_KEY_EXPIRATION_TIME = 60*60*24
 # throttling, an observer typing while not in control would get one
 # control_denied per edge - effectively continuous. At most one every 3s.
 CONTROL_DENIED_THROTTLE = 3.0
+# How long an admin-requested diagnostic log stays pending before it's
+# treated as denied (see PendingLogRequest) - long enough for a human to
+# actually notice and answer the consent dialog, short enough that a channel
+# doesn't stay locked out of remote control indefinitely if nobody's there.
+LOG_REQUEST_TIMEOUT = 60.0
 # Virtual-key codes (Windows). Plain F10 from a master who isn't the controller is
 # a take-over gesture; Alt+F10 from the controller releases control. Either way the
 # gesture itself is swallowed, never relayed as a real keystroke - see
@@ -113,7 +120,13 @@ class Handler(LineReceiver):
 	def connectionLost(self, reason):
 		log.msg("Connection %d lost, bytes sent: %d received: %d" % (self.connection_id, self.bytes_sent, self.bytes_received))
 		self.user.connection_lost()
-		if self.cleanup_timer is not None and not self.cleanup_timer.cancelled:
+		# .called, not just .cancelled: when the INITIAL_TIMEOUT itself is
+		# what's firing (cleanup() -> abortConnection() -> connectionLost(),
+		# all synchronous), the DelayedCall has already fired by the time we
+		# get here - cancelling an already-called DelayedCall raises
+		# AlreadyCalled. Only a still-pending timer (the normal case, a
+		# client that joined/disconnected before the timeout) needs cancelling.
+		if self.cleanup_timer is not None and not self.cleanup_timer.cancelled and not self.cleanup_timer.called:
 			self.cleanup_timer.cancel()
 
 	def lineReceived(self, line):
@@ -157,13 +170,27 @@ class Handler(LineReceiver):
 			if msg_type == 'get_server_info':
 				self.do_get_server_info(parsed)
 				return
+			if msg_type == 'log_access_response':
+				self.do_log_access_response(parsed)
+				return
+			if msg_type == 'log_upload':
+				self.do_log_upload(parsed)
+				return
 			is_master = self.user.connection_type == 'master'
-			if is_master and msg_type == 'key' and self.handle_control_gesture(channel, parsed):
+			# While a diagnostic log request is pending on this channel, the
+			# F10/Alt+F10 take-over gesture is skipped too (falls through to
+			# the denial below instead) - no state changes (who's controller)
+			# while a consent decision is outstanding, even though the
+			# gesture itself grants no input capability on its own.
+			if (
+				is_master and msg_type == 'key' and channel.pending_log_request is None
+				and self.handle_control_gesture(channel, parsed)
+			):
 				return
 			if (
 				is_master
 				and msg_type not in GATE_EXEMPT_MASTER_TYPES
-				and channel.controller is not self.user
+				and (channel.pending_log_request is not None or channel.controller is not self.user)
 			):
 				self.user.send_control_denied()
 				return
@@ -337,6 +364,86 @@ class Handler(LineReceiver):
 			# there's no one left to tell.
 			pass
 
+	def do_admin_request_logs(self, obj):
+		"""Admin-only: ask a specific online session's slave connection for
+		permission to upload its NVDA log for troubleshooting. See
+		PendingLogRequest's docstring for the full design, in particular why
+		the gate has to close *before* request_log_access is ever sent to
+		the slave, not after."""
+		key = obj.get('key')
+		if not key:
+			self._send_log_status(key, status='error', detail='missing_key')
+			return
+		state = self.user.server_state
+		channel = state.channels.get(key)
+		slave = channel.get_slave() if channel is not None else None
+		if slave is None:
+			self._send_log_status(key, status='error', detail='not_online')
+			return
+		if channel.pending_log_request is not None:
+			self._send_log_status(key, status='error', detail='already_pending')
+			return
+		channel.pending_log_request = PendingLogRequest(admin=self.user, slave=slave)
+		channel.pending_log_request.timeout_call = self.user.server_state.clock.callLater(
+			LOG_REQUEST_TIMEOUT, self._log_request_timed_out, channel
+		)
+		slave.send(type='request_log_access')
+		log.msg(f"Admin log request: connection {self.connection_id} requested logs for {key!r}")
+
+	def _log_request_timed_out(self, channel):
+		if channel.pending_log_request is None:
+			return
+		self._resolve_log_request(channel, status='timeout')
+
+	def do_log_access_response(self, obj):
+		"""From the slave being asked, not admin-prefixed - reached via the
+		generic 'already joined' dispatch in lineReceived, not
+		handle_admin_command."""
+		channel = self.user.channel
+		pending = channel.pending_log_request if channel is not None else None
+		if pending is None or pending.slave is not self.user:
+			return
+		if not obj.get('granted'):
+			self._resolve_log_request(channel, status='denied')
+		# else: gate stays closed, waiting for the log_upload that should follow.
+
+	def do_log_upload(self, obj):
+		channel = self.user.channel
+		pending = channel.pending_log_request if channel is not None else None
+		if pending is None or pending.slave is not self.user:
+			return
+		content = obj.get('content') or ''
+		saved_path = save_diagnostic_log(DATA_DIR, channel.key, content)
+		self._resolve_log_request(
+			channel, status='saved', detail=saved_path, truncated=bool(obj.get('truncated'))
+		)
+
+	def _resolve_log_request(self, channel, status, detail=None, truncated=False):
+		pending = channel.pending_log_request
+		if pending is None:
+			return
+		pending.cancel_timeout()
+		channel.pending_log_request = None
+		try:
+			pending.admin.send(
+				type='admin_log_upload_status', key=channel.key, status=status,
+				detail=detail, truncated=truncated,
+			)
+		except Exception:
+			# The admin may have disconnected while this was pending -
+			# nothing to do, there's no one left to tell.
+			pass
+
+	def _send_log_status(self, key, status, detail=None, truncated=False):
+		"""Same shape as _resolve_log_request's admin notification, for the
+		early-rejection paths in do_admin_request_logs (which reply directly
+		to the requester, not via a Channel - there's no pending request to
+		resolve yet)."""
+		self.send(
+			type='admin_log_upload_status', key=key, status=status,
+			detail=detail, truncated=truncated,
+		)
+
 	def do_admin_list_channels(self, obj):
 		channels_info = []
 		state = self.user.server_state
@@ -409,6 +516,11 @@ class Handler(LineReceiver):
 		origin = msg.pop('origin', None)
 		if self.protocol_version > 1 and origin:
 			msg['origin'] = origin
+		# json.dumps defaults to ensure_ascii=True, which \uXXXX-escapes
+		# every non-ASCII character - that's what makes .encode('ascii')
+		# below safe even for payloads with non-ASCII text (e.g. a
+		# diagnostic log upload containing German speech output). Don't
+		# add ensure_ascii=False here without reworking this encode.
 		obj = json.dumps(msg).encode('ascii')
 		self.bytes_sent += len(obj)
 		self.sendLine(obj)
@@ -486,6 +598,20 @@ class User(object):
 	def connection_lost(self):
 		if self.channel is not None:
 			self.channel.remove_connection(self)
+		# A pending diagnostic-log request can be initiated by an admin
+		# connection that isn't a member of the target channel at all - the
+		# normal case, since admin auth is piggybacked on that admin's own
+		# home (slave) connection, not on a connection to the session being
+		# asked about. Channel.remove_connection above only clears a request
+		# when the *slave* being asked disconnects (it's necessarily a
+		# member of that channel); the admin side has to be found separately
+		# here, or a request stays pending forever - locking every master on
+		# that channel out - once its requesting admin is gone.
+		for channel in list(self.server_state.channels.values()):
+			pending = channel.pending_log_request
+			if pending is not None and pending.admin is self:
+				pending.cancel_timeout()
+				channel.pending_log_request = None
 
 	def join(self, channel, connection_type, client_version=None, allow_beta_updates=False):
 		if self.channel:

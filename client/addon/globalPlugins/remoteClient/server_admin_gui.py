@@ -128,7 +128,16 @@ class ServerAdminDialog(wx.Dialog):
 		self.remove_btn = wx.Button(self.sessions_tab, label=_("Block/Remove"))
 		self.remove_btn.Bind(wx.EVT_BUTTON, self.on_remove)
 		hbox2.Add(self.remove_btn, flag=wx.LEFT, border=10)
-		
+
+		# Consent-gated: this only sends a request. Nothing is read on the
+		# other end without that machine's own explicit Yes/No, and remote
+		# control of that session is blocked server-side for as long as the
+		# request is outstanding - see diagnostics.py/server/state.py's
+		# PendingLogRequest for the full design.
+		self.request_logs_btn = wx.Button(self.sessions_tab, label=_("Request diagnostic logs"))
+		self.request_logs_btn.Bind(wx.EVT_BUTTON, self.on_request_logs)
+		hbox2.Add(self.request_logs_btn, flag=wx.LEFT, border=10)
+
 		vbox.Add(hbox2, flag=wx.ALIGN_CENTER|wx.ALL, border=10)
 		self.sessions_tab.SetSizer(vbox)
 
@@ -202,7 +211,19 @@ class ServerAdminDialog(wx.Dialog):
 	def on_remove(self, event):
 		key = self._get_selected_key()
 		if key: self.client.send_admin_remove(key)
-			
+
+	def on_request_logs(self, event):
+		key = self._get_selected_key()
+		if not key:
+			return
+		# Disabled until show_log_upload_status re-enables it - the server
+		# already rejects a second request for the same session while one is
+		# pending ('already_pending'), but disabling here avoids relying on
+		# that round trip just to give the admin an obvious "already asked,
+		# waiting" cue.
+		self.request_logs_btn.Enable(False)
+		self.client.send_admin_request_logs(key)
+
 	def _get_selected_key(self):
 		idx = self.list_ctrl.GetFirstSelected()
 		return self.list_ctrl.GetItemText(idx, 0) if idx != -1 else None
@@ -304,3 +325,28 @@ class ServerAdminDialog(wx.Dialog):
 			else:
 				parts.append(_("No official client release found"))
 		self.show_status("\n".join(parts))
+
+	def show_log_upload_status(self, key, status, detail, truncated):
+		"""Response to on_request_logs, via client.py's
+		handle_log_upload_status - server.py's do_admin_request_logs/
+		_resolve_log_request is the single source of truth for what these
+		status values mean; nothing here reads the log content itself, it's
+		saved server-side (see server/state.py's save_diagnostic_log)."""
+		self.request_logs_btn.Enable(True)
+		messages = {
+			'saved': _("Log received and saved on the server ({key})."),
+			'denied': _("The request was declined on {key}."),
+			'timeout': _("No response from {key} - request timed out."),
+		}
+		if status == 'error':
+			detail_text = {
+				'not_online': _("that session isn't online (or has no slave connection)."),
+				'already_pending': _("a request for that session is already pending."),
+				'missing_key': _("no session was selected."),
+			}.get(detail, detail or _("unknown error."))
+			text = _("Could not request logs for {key}: {reason}").format(key=key, reason=detail_text)
+		else:
+			text = messages.get(status, _("Unexpected response for {key}: {status}")).format(key=key, status=status)
+		if status == 'saved' and truncated:
+			text += " " + _("(only the most recent part of the log was included)")
+		self.show_status(text)

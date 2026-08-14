@@ -1,8 +1,6 @@
 import ctypes
 import ctypes.wintypes
-import logging
 import os
-import sys
 import threading
 from typing import Callable, Optional, Set, Tuple
 
@@ -44,8 +42,6 @@ from winUser import WM_QUIT  # provided by NVDA
 
 from . import dialogs, keyboard_hook
 from .socket_utils import addressToHostPort, hostPortToAddress
-
-logging.getLogger("keyboard_hook").addHandler(logging.StreamHandler(sys.stdout))
 
 # Type aliases
 KeyModifier = Tuple[int, bool]  # (vk_code, extended)

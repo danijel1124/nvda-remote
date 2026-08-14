@@ -180,7 +180,7 @@ def _install_stub_modules():
 			"VERTICAL", "HORIZONTAL", "ALL", "EXPAND", "BOTTOM", "ALIGN_RIGHT",
 			"OK", "CANCEL", "YES", "NO", "YES_NO", "CANCEL_DEFAULT", "CENTRE",
 			"ICON_ERROR", "ICON_WARNING", "ICON_EXCLAMATION", "ICON_INFORMATION", "ITEM_CHECK",
-			"CENTER_ON_SCREEN", "NO_DEFAULT", "BOTH", "Center",
+			"CENTER_ON_SCREEN", "NO_DEFAULT", "BOTH", "Center", "ICON_QUESTION",
 		)):
 			setattr(wx, name, 1 << i)
 		# Event-binding tokens - never OR'd, just passed through to Bind().

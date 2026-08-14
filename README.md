@@ -35,6 +35,7 @@ User-visible behavior beyond stock NVDA Remote:
 - **Server-pushed client updates.** The server tells every connecting client about the latest release; the add-on downloads and installs it automatically (never downgrading, never restarting NVDA without asking) and offers a one-click restart once it's ready.
 - **Optional beta channel.** An opt-in checkbox in the add-on's settings lets a client receive the rolling nightly build instead of stable releases, for testing changes before they're promoted.
 - **Server self-update checks.** The server itself checks GitHub daily (interval configurable) — and on demand — for newer releases of its own code and of the official client, purely as a check (it never auto-applies its own updates, only logs/records what it found and refreshes the pointer to the latest client release).
+- **Consent-gated diagnostic log retrieval.** From the admin GUI, ask a specific online session for its NVDA log to help troubleshoot a problem — nothing is read or sent without that machine's own explicit Yes/No, and remote control of that session is blocked for anyone until the request resolves.
 
 ## Getting Started
 
@@ -79,7 +80,8 @@ The codebase has grown a lot in a short time, across a lot of files. This sectio
 |---|---|
 | `__init__.py` | NVDA global plugin entry point; wires everything together on NVDA startup. |
 | `client.py` | Top-level orchestration: connection lifecycle for master/slave, config-driven auto-connect, local input hooking. |
-| `admin_client.py` | Admin-protocol client (`AdminClientMixin`, mixed into `RemoteClient`): auth, listing/approving/removing sessions, triggering a remote update check. Split from `client.py` because it changes for admin-feature reasons and touches almost none of the master/slave connection state. |
+| `admin_client.py` | Admin-protocol client (`AdminClientMixin`, mixed into `RemoteClient`): auth, listing/approving/removing sessions, triggering a remote update check, requesting a session's diagnostic logs. Split from `client.py` because it changes for admin-feature reasons and touches almost none of the master/slave connection state. |
+| `diagnostics.py` | The slave side of consent-gated diagnostic log retrieval: shows the Yes/No dialog when the admin asks, reads/tail-caps this machine's NVDA log if granted, sends it back. |
 | `transport.py` | Wire protocol I/O — JSON message framing over TCP/TLS, dispatch to registered inbound handlers. |
 | `session.py` | Per-connection session logic (master vs. slave), handling of routed messages. |
 | `protocol.py` | The shared `RemoteMessageType` enum and other protocol constants. |

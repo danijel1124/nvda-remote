@@ -415,6 +415,72 @@ Added in v1.1.0 (server) / v3.2.3 (client). Admin-only (requires `auth_admin` fi
 }
 ```
 
+### Consent-Gated Diagnostic Log Retrieval
+
+Added in v1.3.0 (server) / v3.3.0 (client - versions not yet cut as of writing this section). Admin-only, and separately consent-gated on the target session's own machine: `admin_request_logs` asks the server to request a specific online session's NVDA log for troubleshooting; the server relays `request_log_access` to that session's slave connection, which shows its own Yes/No dialog - nothing is read or sent without that explicit, physical answer.
+
+While a request is pending for a channel, the server denies **all** master input on that channel - not just non-controllers, the current controller too, including the F10/Alt+F10 take-over gesture. This is not a redundant precaution: this fork's remote key control (`localMachine.sendKey` → `input.send_key`) uses real Win32 `SendInput`, so an ordinary modal consent dialog on the slave does not, by itself, stop an already-connected controller from synthesizing a "Yes" onto their own consent prompt. The gate closes server-side *before* `request_log_access` is ever sent to the slave (see `server/state.py`'s `PendingLogRequest`), not after - a `key` message already in flight from the controller must not be able to land after the dialog is showing but before the gate closes.
+
+Only the last part of the log is ever sent (`diagnostics.py`'s `LOG_TAIL_MAX_BYTES`, 256KB), tail-capped client-side; the server independently caps what it will write to disk (`state.py`'s `MAX_DIAGNOSTIC_LOG_BYTES`, 1MiB) as a backstop against a modified client. The consent dialog suggests restarting NVDA first if the person wants to shrink what's included before sharing it.
+
+A pending request times out after `LOG_REQUEST_TIMEOUT` (60s, server-side) if nobody answers, and is cleared immediately if either the requesting admin or the slave being asked disconnects - either way, the gate must never outlive the connection it depends on.
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "admin_request_logs": {
+      "type": "object",
+      "description": "Admin to server: ask a specific session for permission to upload its NVDA log.",
+      "properties": {
+        "type": { "const": "admin_request_logs" },
+        "key": { "type": "string", "description": "The session name to request logs from." }
+      },
+      "required": ["type", "key"]
+    },
+    "admin_log_upload_status": {
+      "type": "object",
+      "description": "Server to the requesting admin: the eventual (or immediate, for a rejected request) outcome.",
+      "properties": {
+        "type": { "const": "admin_log_upload_status" },
+        "key": { "type": ["string", "null"] },
+        "status": { "enum": ["saved", "denied", "timeout", "error"] },
+        "detail": { "type": ["string", "null"], "description": "Saved file path (relative to the server's data dir) on 'saved'; a short reason code on 'error'." },
+        "truncated": { "type": "boolean" }
+      },
+      "required": ["type", "key", "status"]
+    },
+    "request_log_access": {
+      "type": "object",
+      "description": "Server to the target session's slave connection: the consent request itself, shown as a Yes/No dialog.",
+      "properties": {
+        "type": { "const": "request_log_access" }
+      },
+      "required": ["type"]
+    },
+    "log_access_response": {
+      "type": "object",
+      "description": "Slave to server: the human's own answer to the consent dialog.",
+      "properties": {
+        "type": { "const": "log_access_response" },
+        "granted": { "type": "boolean" }
+      },
+      "required": ["type", "granted"]
+    },
+    "log_upload": {
+      "type": "object",
+      "description": "Slave to server, only sent after granted=true: the (tail-capped) log content.",
+      "properties": {
+        "type": { "const": "log_upload" },
+        "content": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      },
+      "required": ["type", "content", "truncated"]
+    }
+  }
+}
+```
+
 ## Security Considerations
 
 - All connections are encrypted using SSL/TLS.

@@ -22,8 +22,10 @@ from twisted.internet.task import LoopingCall
 from twisted.python import log
 
 from collections import OrderedDict
+from datetime import datetime, timezone
 import json
 import os
+import re
 import secrets
 
 QUARANTINE_MSG_INTERVAL = 5.0
@@ -45,6 +47,75 @@ ADDON_RELEASE_FILE = os.path.join(DATA_DIR, "addon_release.json")
 # clients never read this file at all.
 ADDON_BETA_RELEASE_FILE = os.path.join(DATA_DIR, "addon_beta_release.json")
 
+# Where an admin-requested diagnostic log upload (see PendingLogRequest,
+# save_diagnostic_log) gets written. Deliberately under DATA_DIR (the same
+# Docker volume as everything else persistent) so it survives a container
+# restart/redeploy and is trivial to read directly off disk.
+DIAGNOSTIC_LOG_DIR = os.path.join(DATA_DIR, "diagnostic_logs")
+# Hard cap on what gets written to disk, independent of whatever cap the
+# uploading client itself enforces (client/addon/.../diagnostics.py's
+# LOG_TAIL_MAX_BYTES) - a second, server-side backstop against a buggy or
+# malicious client filling up the data volume. Not a wire-protocol guard:
+# Handler.MAX_LENGTH (20MB/line) already bounds the inbound line before it
+# ever reaches save_diagnostic_log, this only bounds what ends up on disk.
+MAX_DIAGNOSTIC_LOG_BYTES = 1024 * 1024  # 1 MiB
+
+
+def save_diagnostic_log(data_dir, key, content):
+	"""Writes an admin-requested diagnostic log upload to
+	<data_dir>/diagnostic_logs/<safe key>_<UTC timestamp>.log and returns
+	that path, relative to data_dir. `key` is a session name the server
+	already tracks as an existing channel (not attacker-controlled
+	free text), but is still passed through a conservative filename-safe
+	filter here rather than used directly, since it becomes a path
+	component."""
+	encoded = content.encode('utf-8')
+	if len(encoded) > MAX_DIAGNOSTIC_LOG_BYTES:
+		# Byte-accurate tail cap (matching the "BYTES" in the constant's
+		# name and the docstring above) - slicing the str by len() would
+		# undercount anything with non-ASCII text (e.g. German speech
+		# output in NVDA's log) since those characters are 2-4 bytes each
+		# in UTF-8. errors='ignore' drops a possibly-truncated multi-byte
+		# sequence at the cut point rather than raising.
+		content = encoded[-MAX_DIAGNOSTIC_LOG_BYTES:].decode('utf-8', errors='ignore')
+	safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', key)[:100] or "unknown"
+	timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+	filename = f"{safe_key}_{timestamp}.log"
+	directory = os.path.join(data_dir, "diagnostic_logs")
+	os.makedirs(directory, exist_ok=True)
+	path = os.path.join(directory, filename)
+	with open(path, 'w', encoding='utf-8') as f:
+		f.write(content)
+	return os.path.join("diagnostic_logs", filename)
+
+
+class PendingLogRequest:
+	"""Tracks one in-flight admin-initiated diagnostic log request for a
+	Channel: who asked (an admin User), who's being asked (the channel's
+	slave User), and the pending timeout DelayedCall.
+
+	While a Channel's pending_log_request is set, Handler.lineReceived
+	denies ALL master input on that channel - not just non-controllers, the
+	actual controller too (see the check next to GATE_EXEMPT_MASTER_TYPES).
+	This has to be a genuine, unconditional gate rather than trusting the
+	slave's own consent dialog to be modal: this fork's remote key control
+	(localMachine.sendKey -> input.send_key) uses real Win32 SendInput, so
+	an already-connected controller could otherwise just synthesize an
+	"OK" onto their own consent prompt. The gate must be set *before* the
+	request is ever relayed to the slave (see do_admin_request_logs) - if
+	relayed first, a `key` message already in flight from the controller
+	could still land after the dialog is showing but before the gate closes.
+	"""
+	def __init__(self, admin, slave, timeout_call=None):
+		self.admin = admin
+		self.slave = slave
+		self.timeout_call = timeout_call
+
+	def cancel_timeout(self):
+		if self.timeout_call is not None and self.timeout_call.active():
+			self.timeout_call.cancel()
+		self.timeout_call = None
+
 
 class Channel(object):
 	def __init__(self, key, server_state=None):
@@ -56,8 +127,22 @@ class Channel(object):
 		# messages. None means the channel is up for grabs - see toggle_controller.
 		self.controller = None
 		self.control_free_loop = None
+		# See PendingLogRequest's docstring - a diagnostic log request
+		# in-flight for this channel, or None.
+		self.pending_log_request = None
 		log.msg(f"Channel created for key: {self.key}")
 		self.check_authorization()
+
+	def get_slave(self):
+		"""The channel's slave connection - the NVDA instance whose hostname
+		this session name is pinned to (see the repo-wide session model) -
+		or None if only masters are currently connected, or nobody is. At
+		most one slave is ever expected per channel in this fork's
+		hostname-pinned model."""
+		for client in self.clients.values():
+			if client.connection_type == 'slave':
+				return client
+		return None
 
 	def check_authorization(self):
 		self.is_authorized = self.server_state.is_key_authorized(self.key)
@@ -132,6 +217,15 @@ class Channel(object):
 		controller_left = self.controller is con
 		if controller_left:
 			self.controller = None
+		# Whichever side of a pending diagnostic-log request just left - the
+		# requesting admin (no one left to report the outcome to) or the
+		# slave being asked (no one left to answer) - the gate must not
+		# outlive the connection it depends on, or every master on this
+		# channel stays locked out forever.
+		pending = self.pending_log_request
+		if pending is not None and con in (pending.admin, pending.slave):
+			pending.cancel_timeout()
+			self.pending_log_request = None
 		for client in self.clients.values():
 			if client.protocol.protocol_version == 1:
 				client.send(type='client_left', user_id=con.user_id)

@@ -1,9 +1,12 @@
-from logging import getLogger
 from typing import List, Callable, Optional
 import ctypes
 from ctypes import Structure, c_int, c_long, wintypes
 
-logger = getLogger('keyboard_hook')
+# Deliberately NVDA's own log (not a bare stdlib logging.getLogger('keyboard_hook')
+# + StreamHandler(sys.stdout), which is where this used to go - a windowed NVDA.exe
+# has no console attached to sys.stdout, so anything logged there was effectively
+# discarded, hiding real exceptions from keyboard_proc's callback loop below).
+from logHandler import log
 
 HC_ACTION = 0
 WH_KEYBOARD_LL = 13
@@ -57,8 +60,15 @@ class KeyboardHook:
 		for callback in self.callbacks:
 			try:
 				should_pass_on = not callback(vk_code=vk_code, scan_code=scan_code, extended=extended, pressed=pressed)
-			except Exception as e:
-				logger.exception("Error calling callback %r" % callback)
+			except Exception:
+				# Deliberately fail open (should_pass_on keeps its prior value,
+				# i.e. the key still reaches the local machine normally) -
+				# a buggy callback must never be able to lock up the entire
+				# keyboard system-wide. But it must be loud: this is exactly
+				# the failure mode that silently turns "remote key control"
+				# into "nothing happens, everything stays local" with no
+				# visible symptom other than this log entry.
+				log.exception(f"NVDA Remote: keyboard hook callback failed: {callback!r}")
 		if not should_pass_on:
 			return 1
 		return ctypes.windll.user32.CallNextHookEx(0, code, wParam, lParam)

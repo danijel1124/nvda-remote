@@ -75,6 +75,7 @@ import ui
 from speech.extensions import speechCanceled
 
 from . import addon_update, configuration, connection_info, cues, nvda_patcher
+from .diagnostics import SlaveDiagnostics
 
 from .localMachine import LocalMachine
 from .protocol import RemoteMessageType
@@ -341,6 +342,7 @@ class SlaveSession(RemoteSession):
 		self.transport.registerInbound(
 			RemoteMessageType.send_SAS, self.localMachine.sendSAS
 		)
+		self.diagnostics = SlaveDiagnostics(self.transport)
 
 	def registerCallbacks(self) -> None:
 		super().registerCallbacks()

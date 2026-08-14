@@ -17,6 +17,7 @@ from twisted.test.proto_helpers import StringTransportWithDisconnection
 from twisted.trial import unittest
 
 import server as server_module
+import state as state_module
 from server import (
 	CONTROL_DENIED_THROTTLE,
 	CONTROL_FREE_MSG_INTERVAL,
@@ -764,3 +765,245 @@ class RelayServerTestCase(unittest.TestCase):
 		msgs = _read(t)
 		joined = [m for m in msgs if m['type'] == 'channel_joined']
 		self.assertTrue(joined)  # join succeeded despite the field being absent
+
+	def test_unjoined_connection_timing_out_does_not_crash(self):
+		# Regression: cleanup() -> abortConnection() -> connectionLost() all
+		# fire synchronously when the INITIAL_TIMEOUT DelayedCall itself is
+		# what's running - by then it's already .called (not just possibly
+		# .cancelled), and connectionLost's guard used to check only
+		# .cancelled, raising AlreadyCalled on its own cancel() attempt.
+		# Found via test_timeout_notifies_admin_and_reopens_the_gate before
+		# _admin() was changed to join first.
+		p, t = self.connect()
+		self.clock.advance(server_module.INITIAL_TIMEOUT)  # must not raise
+
+	# --- consent-gated diagnostic log retrieval (admin-initiated) ---
+
+	def _admin(self):
+		# A realistic admin connection: auth is piggybacked on that admin's
+		# own home (slave) connection, like the real client does
+		# (client.py's _get_active_transport) - deliberately NOT a member of
+		# whatever channel it later requests logs for.
+		p, t = self.join('admin-tool', 'slave')
+		self.send(p, type='auth_admin', token=self.state.admin_token)
+		_read(t)
+		return p, t
+
+	def test_admin_request_logs_requires_admin(self):
+		p, t = self.connect()
+		self.send(p, type='admin_request_logs', key='pcA')
+		self.assertEqual(_read(t), [{'type': 'error', 'error': 'access_denied'}])
+
+	def test_joined_non_admin_master_cannot_request_logs(self):
+		# The dangerous variant of the above: a client that IS joined to the
+		# target channel (as a plain, non-admin master) must not be able to
+		# open the gate on its own channel just by sending admin_request_logs
+		# without ever authenticating as admin.
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')
+		_read(ts); _read(tm)
+		self.send(master, type='admin_request_logs', key='pcA')
+		self.assertEqual(_read(tm), [{'type': 'error', 'error': 'access_denied'}])
+		self.assertEqual(_read(ts), [])  # slave never sees a request_log_access
+		channel = self.state.channels['pcA']
+		self.assertIsNone(channel.pending_log_request)
+
+	def test_admin_request_logs_errors_when_session_offline(self):
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='doesNotExist')
+		msgs = _read(ta)
+		self.assertEqual(msgs, [{
+			'type': 'admin_log_upload_status', 'key': 'doesNotExist',
+			'status': 'error', 'detail': 'not_online', 'truncated': False,
+		}])
+
+	def test_admin_request_logs_errors_when_no_slave_connected(self):
+		# Only a master present (e.g. someone mid control-another-computer) -
+		# there's no "home" NVDA instance for that key to ask.
+		self.join('pcA', 'master')
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		msgs = _read(ta)
+		self.assertEqual(msgs[0]['status'], 'error')
+		self.assertEqual(msgs[0]['detail'], 'not_online')
+
+	def test_request_log_access_reaches_the_slave_not_any_master(self):
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		self.assertEqual(_types(_read(ts)), ['request_log_access'])
+		self.assertEqual(_read(tm), [])
+
+	def test_granted_upload_is_saved_and_admin_notified(self):
+		slave, ts = self.join('pcA', 'slave')
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.send(slave, type='log_access_response', granted=True)
+		self.assertEqual(_read(ta), [])  # no status yet - waiting for the upload
+		self.send(slave, type='log_upload', content='hello nvda log', truncated=False)
+		msgs = _read(ta)
+		self.assertEqual(len(msgs), 1)
+		self.assertEqual(msgs[0]['type'], 'admin_log_upload_status')
+		self.assertEqual(msgs[0]['status'], 'saved')
+		self.assertEqual(msgs[0]['truncated'], False)
+		saved_path = os.path.join(os.getcwd(), 'data', msgs[0]['detail'])
+		with open(saved_path, encoding='utf-8') as f:
+			self.assertEqual(f.read(), 'hello nvda log')
+
+	def test_non_ascii_log_content_round_trips(self):
+		# json.dumps(...).encode('ascii') in Handler.send only works because
+		# json.dumps defaults to ensure_ascii=True (\uXXXX-escaping non-ASCII
+		# text). NVDA's speech log is very likely to contain German text
+		# (umlauts, etc.) - confirm the whole path survives that, both over
+		# the wire and in the saved file on disk.
+		slave, ts = self.join('pcA', 'slave')
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.send(slave, type='log_access_response', granted=True)
+		content = 'Nicht autorisiert — Grüße, äöüß'
+		self.send(slave, type='log_upload', content=content, truncated=False)
+		msgs = _read(ta)
+		self.assertEqual(msgs[0]['status'], 'saved')
+		saved_path = os.path.join(os.getcwd(), 'data', msgs[0]['detail'])
+		with open(saved_path, encoding='utf-8') as f:
+			self.assertEqual(f.read(), content)
+
+	def test_large_non_ascii_log_is_tail_capped_by_bytes_not_chars(self):
+		# save_diagnostic_log's cap must bound encoded UTF-8 bytes, not
+		# Python str length - a log full of non-ASCII text (German speech
+		# output) is 2-4x larger encoded than len() suggests, so a
+		# char-based cap wouldn't actually bound the write.
+		slave, ts = self.join('pcB', 'slave')
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcB')
+		_read(ts)
+		self.send(slave, type='log_access_response', granted=True)
+		# Leading 'x' makes the cut land mid-character almost always (unlike
+		# an all-'ä' string, where a cap that's a multiple of 2 always cuts
+		# cleanly) - this is the production-common case, where errors=
+		# 'ignore' actually has something to drop.
+		oversized = 'x' + 'ä' * (state_module.MAX_DIAGNOSTIC_LOG_BYTES)  # 2 bytes each in UTF-8
+		self.send(slave, type='log_upload', content=oversized, truncated=False)
+		msgs = _read(ta)
+		self.assertEqual(msgs[0]['status'], 'saved')
+		saved_path = os.path.join(os.getcwd(), 'data', msgs[0]['detail'])
+		with open(saved_path, 'rb') as f:
+			raw = f.read()
+		self.assertLessEqual(len(raw), state_module.MAX_DIAGNOSTIC_LOG_BYTES)
+		# Lower-bound too, so a regression that over-truncates (e.g. an
+		# errors='strict' crash swallowed elsewhere, or slicing the wrong
+		# end) doesn't silently pass just because "smaller than the cap".
+		self.assertGreater(len(raw), state_module.MAX_DIAGNOSTIC_LOG_BYTES - 10)
+		# The tail (most recent log content) must be what's kept, not the
+		# head - a log's newest lines are the ones that matter.
+		self.assertTrue(raw.decode('utf-8').endswith('ä'))
+
+	def test_denied_response_notifies_admin_and_reopens_the_gate(self):
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')  # auto-controller
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.send(slave, type='log_access_response', granted=False)
+		msgs = _read(ta)
+		self.assertEqual(msgs[0]['status'], 'denied')
+		# Gate must be open again immediately - a real remote-control message
+		# from the (still) controller reaches the slave normally.
+		self.send(master, type='speak', sequence=['hi'])
+		self.assertEqual(_types(_read(ts)), ['speak'])
+
+	def test_timeout_notifies_admin_and_reopens_the_gate(self):
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.clock.advance(server_module.LOG_REQUEST_TIMEOUT)
+		msgs = _read(ta)
+		self.assertEqual(msgs[0]['status'], 'timeout')
+		self.send(master, type='speak', sequence=['hi'])
+		self.assertEqual(_types(_read(ts)), ['speak'])
+
+	def test_second_request_while_one_pending_is_rejected(self):
+		self.join('pcA', 'slave')
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ta)
+		self.send(admin, type='admin_request_logs', key='pcA')
+		msgs = _read(ta)
+		self.assertEqual(msgs[0]['status'], 'error')
+		self.assertEqual(msgs[0]['detail'], 'already_pending')
+
+	def test_pending_request_blocks_the_actual_controller_not_just_observers(self):
+		# The whole point: this fork's remote key control uses real Win32
+		# SendInput (see input.send_key), so an ordinary modal consent dialog
+		# on its own would not stop an already-connected controller from
+		# synthesizing an "OK" onto their own consent prompt. The server-side
+		# gate is what actually has to hold.
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')  # auto-controller
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.send(master, type='speak', sequence=['hi'])
+		self.assertEqual(_read(ts), [])  # not relayed
+		self.assertEqual(_types(_read(tm)), ['control_denied'])
+
+	def test_pending_request_also_blocks_the_f10_takeover_gesture(self):
+		slave, ts = self.join('pcA', 'slave')
+		master1, tm1 = self.join('pcA', 'master')  # auto-controller
+		master2, tm2 = self.join('pcA', 'master')  # observer
+		_read(ts); _read(tm1); _read(tm2)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.tap_f10(master2)
+		self.assertEqual(_types(_read(tm2)), ['control_denied'])
+		self.assertEqual(_read(ts), [])
+
+	def test_spoofed_response_from_a_master_is_ignored(self):
+		# Only the actual slave being asked can answer - a master pretending
+		# to be it must not be able to grant its own request.
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		self.send(master, type='log_access_response', granted=True)
+		self.assertEqual(_read(ta), [])  # nothing resolved
+		self.send(master, type='speak', sequence=['hi'])
+		self.assertEqual(_read(ts), [])  # gate is still up
+
+	def test_admin_disconnect_while_pending_clears_the_gate(self):
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		admin.connectionLost(None)
+		self.send(master, type='speak', sequence=['hi'])
+		self.assertEqual(_types(_read(ts)), ['speak'])
+
+	def test_slave_disconnect_while_pending_clears_the_gate(self):
+		# Reconnecting slave gets a fresh channel/gate - verified by checking
+		# the *new* slave connection isn't gated by the stale request.
+		slave, ts = self.join('pcA', 'slave')
+		master, tm = self.join('pcA', 'master')
+		_read(ts); _read(tm)
+		admin, ta = self._admin()
+		self.send(admin, type='admin_request_logs', key='pcA')
+		_read(ts)
+		slave.connectionLost(None)
+		slave2, ts2 = self.join('pcA', 'slave')
+		_read(ts2)
+		self.send(master, type='speak', sequence=['hi'])
+		self.assertEqual(_types(_read(ts2)), ['speak'])

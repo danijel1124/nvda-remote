@@ -103,6 +103,18 @@ class AdminClientMixin:
 			self._awaitingUpdateCheck = True
 			t.send(RemoteMessageType.admin_check_for_updates)
 
+	def send_admin_request_logs(self, key):
+		"""Ask the server to request the given session's NVDA log for
+		troubleshooting - consent-gated on that machine's side (it shows its
+		own Yes/No dialog; nothing is read or sent without that explicit,
+		physical answer). See server/state.py's PendingLogRequest for why
+		remote control on that channel is blocked server-side for the
+		duration, and client's admin_log_upload_status handler for the
+		eventual result."""
+		t = self._get_active_transport()
+		if t:
+			t.send(RemoteMessageType.admin_request_logs, key=key)
+
 	def _maybe_reauth_admin(self, transport):
 		"""Called whenever a transport (re)connects. RelayTransport reconnects
 		silently on a dropped connection (ConnectorThread) without tearing the
@@ -128,6 +140,7 @@ class AdminClientMixin:
 		transport.registerInbound(RemoteMessageType.admin_channel_list, self.handle_channel_list)
 		transport.registerInbound(RemoteMessageType.admin_response, self.handle_admin_response)
 		transport.registerInbound(RemoteMessageType.admin_update_check_response, self.handle_update_check_response)
+		transport.registerInbound(RemoteMessageType.admin_log_upload_status, self.handle_log_upload_status)
 
 	def handle_auth_response(self, success=False):
 		self._admin_authenticated = success
@@ -157,3 +170,7 @@ class AdminClientMixin:
 		self._awaitingUpdateCheck = False
 		if self.admin_ui:
 			self.admin_ui.show_update_check_results(server, client)
+
+	def handle_log_upload_status(self, key=None, status=None, detail=None, truncated=False):
+		if self.admin_ui:
+			self.admin_ui.show_log_upload_status(key, status, detail, truncated)
