@@ -524,6 +524,19 @@ class RemoteClient(AdminClientMixin):
 	def hook(self):
 		log.debug("Hook thread start")
 		keyhook = keyboard_hook.KeyboardHook()
+		if not keyhook.handle:
+			# keyboard_hook.py already logged the GetLastError detail - this
+			# is the audible half, so the failure is obvious immediately
+			# instead of only visible after later fetching the log. Still
+			# enter the message loop below rather than returning early: a
+			# later onDisconnectingAsMaster PostThreadMessageW(WM_QUIT) call
+			# expects this thread to have a message queue pumping.
+			wx.CallAfter(
+				ui.message,
+				# Translators: Presented when the low-level keyboard hook needed for
+				# remote key control could not be installed (see the NVDA log for why).
+				_("Remote key control could not be started. See the NVDA log for details."),
+			)
 		keyhook.register_callback(self.hook_callback)
 		msg = ctypes.wintypes.MSG()
 		while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0):

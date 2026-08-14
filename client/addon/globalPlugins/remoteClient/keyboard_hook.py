@@ -34,12 +34,34 @@ class KeyboardHook:
 	def __init__(self) -> None:
 		self.callbacks: List[Callable[..., bool]] = list()
 		self.proc = LowLevelKeyboardProc(self.keyboard_proc)
-		self.handle: Optional[int] = ctypes.windll.user32.SetWindowsHookExW(
-			WH_KEYBOARD_LL, 
+		# use_last_error=True on this one call (not module-wide) so
+		# ctypes.get_last_error() below reflects SetWindowsHookExW's own
+		# GetLastError() reliably - going through the plain ctypes.windll
+		# proxy instead risks an intervening Win32 call (from the
+		# interpreter itself) clobbering the thread's last-error value
+		# before we get to read it.
+		user32 = ctypes.WinDLL('user32', use_last_error=True)
+		self.handle: Optional[int] = user32.SetWindowsHookExW(
+			WH_KEYBOARD_LL,
 			self.proc,
 			ctypes.windll.kernel32.GetModuleHandleW(None),
 			0
 		)
+		if not self.handle:
+			# Previously silent: toggleRemoteKeyControl would still flip
+			# sendingKeys and announce "Controlling remote machine.", but
+			# with no hook installed keyboard_proc is never called by
+			# Windows at all - no exception, no callback, nothing to log
+			# from the paths above. Keys just silently keep reaching the
+			# local machine. This is the loud version of that failure.
+			log.error(
+				"NVDA Remote: SetWindowsHookExW failed (GetLastError=%d) - "
+				"remote key control will silently do nothing: NVDA will "
+				"still announce 'Controlling remote machine' but keys will "
+				"keep reaching the local machine." % ctypes.get_last_error()
+			)
+		else:
+			log.info(f"NVDA Remote: keyboard hook installed (handle={self.handle})")
 
 	def register_callback(self, callback: Callable[..., bool]) -> None:
 		self.callbacks.append(callback)
