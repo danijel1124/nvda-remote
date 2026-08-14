@@ -63,7 +63,8 @@ The codebase has grown a lot in a short time, across a lot of files. This sectio
 
 | File | Purpose |
 |---|---|
-| `server.py` | The relay itself: session channels, whitelist/quarantine, admin API, controller/observer control-handoff, self-update-push endpoints. |
+| `server.py` | Protocol dispatch: `Handler`/`User`/`RemoteServerFactory` — wire-level message handling, admin API, controller/observer control-handoff, self-update-push endpoints. |
+| `state.py` | Session/persisted state: `Channel` (who's in a session, who controls it, quarantine) and `ServerState` (whitelist, seen-keys, admin token, release-pointer files, the channel registry). Split from `server.py` because it changes for persistence/session-state reasons, not protocol-dispatch ones. |
 | `update_check.py` | Polls GitHub for the server's own newer releases, the latest *official* client release, and the latest beta/nightly client build. |
 | `check_server_update.py` | CLI: run an update check immediately, without waiting for the daily schedule. |
 | `set_addon_release.py` | CLI: manually override which client version/URL the server pushes (normally kept current automatically). |
@@ -77,7 +78,8 @@ The codebase has grown a lot in a short time, across a lot of files. This sectio
 | File | Purpose |
 |---|---|
 | `__init__.py` | NVDA global plugin entry point; wires everything together on NVDA startup. |
-| `client.py` | Top-level orchestration: connection lifecycle for master/slave/admin, config-driven auto-connect. |
+| `client.py` | Top-level orchestration: connection lifecycle for master/slave, config-driven auto-connect, local input hooking. |
+| `admin_client.py` | Admin-protocol client (`AdminClientMixin`, mixed into `RemoteClient`): auth, listing/approving/removing sessions, triggering a remote update check. Split from `client.py` because it changes for admin-feature reasons and touches almost none of the master/slave connection state. |
 | `transport.py` | Wire protocol I/O — JSON message framing over TCP/TLS, dispatch to registered inbound handlers. |
 | `session.py` | Per-connection session logic (master vs. slave), handling of routed messages. |
 | `protocol.py` | The shared `RemoteMessageType` enum and other protocol constants. |
